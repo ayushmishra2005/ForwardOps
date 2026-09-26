@@ -274,6 +274,7 @@ class Observation:
     summary: str
     provenance: dict[str, Any]
     coverage: dict[str, Any]
+    retrieval_time: str | None = None
 
 
 @dataclass(frozen=True)

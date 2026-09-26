@@ -8,6 +8,7 @@ from forwardops.tools.contracts import (
     GetOracleStateInput,
     GetRecentDeploymentsInput,
     GetRecentWithdrawalFailuresInput,
+    GetSolanaAccountInput,
     GetSolanaTransactionInput,
     GetVaultStateInput,
     LogSearchResult,
@@ -15,6 +16,7 @@ from forwardops.tools.contracts import (
     RunbookSearchResult,
     SearchApplicationLogsInput,
     SearchRunbooksInput,
+    SolanaAccountView,
     TransactionView,
     VaultState,
     WithdrawalFailureSummary,
@@ -48,7 +50,19 @@ def tool_definitions() -> dict[str, ToolDefinition]:
             GetSolanaTransactionInput,
             TransactionView,
             "solana-fixture",
-            "Read one failed transaction by a signature from the withdrawal sample.",
+            "Read one transaction by signature on the investigation cluster. "
+            "The RPC endpoint comes from ForwardOps configuration. "
+            "Replay investigations only accept signatures from the withdrawal sample.",
+        ),
+        ToolDefinition(
+            "get_solana_account",
+            "v1",
+            GetSolanaAccountInput,
+            SolanaAccountView,
+            "solana-rpc",
+            "Read the current account at an address on the configured Solana cluster. "
+            "The result is the account observed at retrieval time, not historical state. "
+            "The RPC endpoint is not an argument.",
         ),
         ToolDefinition(
             "search_application_logs",

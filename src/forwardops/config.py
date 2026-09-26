@@ -1,9 +1,11 @@
 import os
+import re
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from forwardops.domain.errors import ConfigError
 from forwardops.domain.hashing import sha256_canonical
@@ -100,6 +102,59 @@ class Identity(BaseModel):
         return tuple(dict.fromkeys(value))
 
 
+_CLUSTER_ID = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
+_SOLANA_COMMITMENTS = frozenset({"processed", "confirmed", "finalized"})
+
+
+class DecoderBinding(BaseModel):
+    """Names one decoder that is already installed in this build."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    decoder_id: str = Field(min_length=1, max_length=64)
+    version: str = Field(min_length=1, max_length=32)
+    program_id: str
+
+    @field_validator("decoder_id", "version")
+    @classmethod
+    def _token(cls, value: str) -> str:
+        if re.fullmatch(r"[A-Za-z0-9._-]{1,64}", value) is None:
+            raise ValueError("decoder id and version must be configuration tokens")
+        return value
+
+    @field_validator("program_id")
+    @classmethod
+    def _program(cls, value: str) -> str:
+        require_decoded_length(value, 32)
+        return value
+
+
+class SolanaCluster(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    cluster_id: str
+    rpc_url: str = Field(repr=False)
+    commitment: Literal["processed", "confirmed", "finalized"] = "finalized"
+
+    @field_validator("cluster_id")
+    @classmethod
+    def _cluster(cls, value: str) -> str:
+        if _CLUSTER_ID.fullmatch(value) is None:
+            raise ValueError("Solana cluster id must be a logical identifier")
+        return value
+
+    @field_validator("rpc_url")
+    @classmethod
+    def _rpc_url(cls, value: str) -> str:
+        stripped = value.strip()
+        if stripped != value or any(character in value for character in "\r\n\t "):
+            raise ValueError("Solana RPC URL must be an https endpoint")
+        parts = urlsplit(stripped)
+        if parts.scheme != "https" or not parts.hostname:
+            raise ValueError("Solana RPC URL must be an https endpoint")
+        return stripped
+
+
 class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
@@ -126,6 +181,9 @@ class Settings(BaseModel):
     max_model_calls: int = 16
     token_budget: int = 120_000
     model_timeout_seconds: float = 30
+    solana_clusters: tuple[SolanaCluster, ...] = ()
+    solana_timeout_seconds: float = 8
+    solana_decoders: tuple[DecoderBinding, ...] = ()
 
 
 def load_customer(path: Path) -> CustomerConfig:
@@ -152,6 +210,42 @@ def _require_roles(customer: CustomerConfig, identities: tuple[Identity, ...]) -
         raise ConfigError("customer tenant is missing an investigator identity")
     if not any("approver" in item.roles for item in scoped):
         raise ConfigError("customer tenant is missing an approver identity")
+
+
+def configured_solana_clusters(
+    *,
+    cluster: str | None,
+    rpc_url: str | None,
+    commitment: str,
+    customer_cluster_ref: str,
+) -> tuple[SolanaCluster, ...]:
+    cluster_id = (cluster or "").strip()
+    url = (rpc_url or "").strip()
+    if not cluster_id and not url:
+        return ()
+    if not cluster_id or not url:
+        raise ConfigError(
+            "FORWARDOPS_SOLANA_CLUSTER and FORWARDOPS_SOLANA_RPC_URL must both be set"
+        )
+    if cluster_id == customer_cluster_ref:
+        raise ConfigError("FORWARDOPS_SOLANA_CLUSTER must not reuse the replay cluster_ref")
+    if commitment not in _SOLANA_COMMITMENTS:
+        raise ConfigError("FORWARDOPS_SOLANA_COMMITMENT must be processed, confirmed, or finalized")
+    try:
+        parsed = SolanaCluster.model_validate(
+            {"cluster_id": cluster_id, "rpc_url": url, "commitment": commitment}
+        )
+    except ValidationError:
+        raise ConfigError(
+            "Solana configuration needs a logical cluster id and an https RPC URL"
+        ) from None
+    return (parsed,)
+
+
+def solana_timeout(value: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float) or not 1 <= float(value) <= 30:
+        raise ConfigError("FORWARDOPS_SOLANA_TIMEOUT_SECONDS must be between 1 and 30")
+    return float(value)
 
 
 def resolve_model_configuration(provider: str, api_key: str | None) -> tuple[str, str]:
@@ -187,6 +281,11 @@ def build_settings(
     token_budget: int = 120_000,
     deadline_seconds: int = 120,
     model_timeout_seconds: float = 30,
+    solana_cluster: str | None = None,
+    solana_rpc_url: str | None = None,
+    solana_commitment: str = "finalized",
+    solana_timeout_seconds: float = 8,
+    solana_decoders: tuple[DecoderBinding, ...] = (),
 ) -> Settings:
     if environment != "development":
         raise ConfigError("development authentication cannot start outside development")
@@ -203,6 +302,19 @@ def build_settings(
     analysis_mode, provider_name = resolve_model_configuration(model_provider_name, openai_api_key)
     if provider_name == "openai" and not openai_base_url.startswith("https://"):
         raise ConfigError("model provider base URL must use https")
+    solana_clusters = configured_solana_clusters(
+        cluster=solana_cluster,
+        rpc_url=solana_rpc_url,
+        commitment=solana_commitment,
+        customer_cluster_ref=customer.cluster_ref,
+    )
+    timeout = solana_timeout(solana_timeout_seconds)
+    from forwardops.integrations.solana import (
+        INSTALLED_ACCOUNT_DECODERS,
+        require_installed_decoders,
+    )
+
+    require_installed_decoders(solana_decoders, INSTALLED_ACCOUNT_DECODERS)
     return Settings(
         environment="development",
         database_url=database_url,
@@ -227,6 +339,9 @@ def build_settings(
         max_model_calls=max_model_calls,
         token_budget=token_budget,
         model_timeout_seconds=model_timeout_seconds,
+        solana_clusters=solana_clusters,
+        solana_timeout_seconds=timeout,
+        solana_decoders=solana_decoders,
     )
 
 
@@ -255,6 +370,10 @@ def load_settings() -> Settings:
             token_budget=int(os.environ.get("FORWARDOPS_TOKEN_BUDGET", "120000")),
             deadline_seconds=int(os.environ.get("FORWARDOPS_DEADLINE_SECONDS", "120")),
             model_timeout_seconds=float(os.environ.get("FORWARDOPS_MODEL_TIMEOUT_SECONDS", "30")),
+            solana_cluster=os.environ.get("FORWARDOPS_SOLANA_CLUSTER"),
+            solana_rpc_url=os.environ.get("FORWARDOPS_SOLANA_RPC_URL"),
+            solana_commitment=os.environ.get("FORWARDOPS_SOLANA_COMMITMENT", "finalized"),
+            solana_timeout_seconds=float(os.environ.get("FORWARDOPS_SOLANA_TIMEOUT_SECONDS", "8")),
         )
     except KeyError as exc:
         raise ConfigError(f"missing environment variable {exc.args[0]}") from exc

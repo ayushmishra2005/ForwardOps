@@ -92,7 +92,7 @@ FACT and INFERENCE must cite evidence_id values from this request with relation 
 UNKNOWN findings state what is not established, include a limitation, and do not carry confidence.
 Why an oracle publisher stopped updating stays UNKNOWN unless this request contains direct evidence of that cause.
 You may propose only the permitted action type in the scope. A proposal is not execution and does not approve the action.
-Request only listed tools. Do not request shell commands, SQL, or URLs.
+Request only listed tools. Do not request shell commands, SQL, URLs, RPC hostnames, or JSON-RPC methods.
 Copy service, vault, oracle, cluster, and window values from the scope. Use sample_cap as the withdrawal limit.
 get_recent_deployments is not required to test oracle freshness.
 When collection_gaps is not empty, request the missing reads. When it is empty, return analysis.
@@ -165,7 +165,17 @@ async def investigate_with_model(
                 conn, gateway.context.claim, renew_seconds=settings.lease_seconds
             )
         state = await _load_state(database, investigation)
-        request = _request(investigation, scope, state, budget, notes, tokens_used, len(calls))
+        live_solana = any(item.cluster_id == scope.cluster_ref for item in settings.solana_clusters)
+        request = _request(
+            investigation,
+            scope,
+            state,
+            budget,
+            notes,
+            tokens_used,
+            len(calls),
+            live_solana=live_solana,
+        )
         started = time.perf_counter()
         try:
             reply = await provider.complete(request)
@@ -285,6 +295,8 @@ def _request(
     notes: list[str],
     tokens_used: int,
     model_calls_used: int,
+    *,
+    live_solana: bool = False,
 ) -> ModelRequest:
     customer = scope
     permitted = investigation.scope.get("updater_target", scope.updater_target)
@@ -295,7 +307,7 @@ def _request(
     definitions = tool_definitions()
     allowed = [
         _tool_view(definitions[name])
-        for name in _allowed_names(state.succeeded_tools)
+        for name in _allowed_names(state.succeeded_tools, live_solana=live_solana)
         if name in definitions
     ]
     return ModelRequest(
@@ -555,7 +567,7 @@ def _collection_gaps(evidence: list[EvidenceSummary]) -> list[str]:
     return []
 
 
-def _allowed_names(succeeded: set[str]) -> list[str]:
+def _allowed_names(succeeded: set[str], *, live_solana: bool = False) -> list[str]:
     names = ["get_recent_withdrawal_failures", "get_recent_deployments"]
     if "get_recent_withdrawal_failures" in succeeded:
         names.append("get_solana_transaction")
@@ -565,6 +577,8 @@ def _allowed_names(succeeded: set[str]) -> list[str]:
         names.append("get_oracle_state")
     if "get_oracle_state" in succeeded:
         names.append("search_runbooks")
+    if live_solana:
+        names.extend(["get_solana_transaction", "get_solana_account"])
     ordered: list[str] = []
     for name in names:
         if name not in ordered:

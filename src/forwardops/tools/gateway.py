@@ -13,6 +13,8 @@ from forwardops.domain.hashing import sha256_canonical, to_canonical
 from forwardops.domain.investigation import InvestigationScope
 from forwardops.domain.time import parse_utc
 from forwardops.integrations.replay import HandlerResult, ReplayHandlers
+from forwardops.integrations.routing import RoutingHandlers
+from forwardops.integrations.solana import bind_rpc_log
 from forwardops.storage.leases import Claim
 from forwardops.storage.postgres import (
     Database,
@@ -90,7 +92,7 @@ class ToolGateway:
     def __init__(
         self,
         database: Database,
-        handlers: ReplayHandlers,
+        handlers: ReplayHandlers | RoutingHandlers,
         context: ToolContext,
         *,
         suspend_after_new_tool_calls: int | None = None,
@@ -192,7 +194,7 @@ class ToolGateway:
                     arguments_digest=sha256_canonical(canonical_args),
                     deadline_at=datetime.now(UTC) + timedelta(seconds=8),
                     worker_epoch=self.context.lease_epoch,
-                    source_id=definition.source_id,
+                    source_id=self._source_id(definition, parsed),
                     trace_id=self.context.trace_id,
                 )
                 started = (tool_call_id, attempt)
@@ -242,8 +244,8 @@ class ToolGateway:
             await require_live_lease(
                 conn, self.context.claim, renew_seconds=self.context.lease_seconds
             )
-            observed_at = parse_utc(self.context.frozen_observed_at)
             base = await db_now(conn)
+            frozen_observed_at = parse_utc(self.context.frozen_observed_at)
             for index, observation in enumerate(observations):
                 evidence_id = uuid4()
                 self._check_size(observation.payload)
@@ -268,7 +270,9 @@ class ToolGateway:
                     event_time=parse_utc(observation.event_time)
                     if observation.event_time
                     else None,
-                    observed_at=observed_at,
+                    observed_at=parse_utc(observation.retrieval_time)
+                    if observation.retrieval_time
+                    else frozen_observed_at,
                     time_basis=observation.time_basis,
                     correlation=observation.correlation,
                     payload=observation.payload,
@@ -290,7 +294,26 @@ class ToolGateway:
 
     async def _invoke(self, definition: ToolDefinition, parsed: BaseModel) -> HandlerResult:
         method = getattr(self.handlers, definition.name)
-        return await method(self.context.scope, parsed)
+        with bind_rpc_log(
+            investigation_id=str(self.context.investigation_id),
+            request_id=self.context.request_id,
+        ):
+            return await method(self.context.scope, parsed)
+
+    def _source_id(self, definition: ToolDefinition, parsed: BaseModel) -> str:
+        resolver = getattr(self.handlers, "source_id_for", None)
+        if resolver is not None:
+            chosen = resolver(definition.name, parsed)
+            if isinstance(chosen, str) and chosen:
+                return chosen
+        return definition.source_id
+
+    def _serves_live_solana(self, parsed: BaseModel) -> bool:
+        cluster = getattr(parsed, "cluster_ref", None)
+        serves = getattr(self.handlers, "serves_solana_cluster", None)
+        if not isinstance(cluster, str) or serves is None:
+            return False
+        return bool(serves(cluster))
 
     def _enforce_scope(self, parsed: BaseModel) -> None:
         enforce_tool_scope(parsed, self.context.scope)
@@ -299,6 +322,8 @@ class ToolGateway:
         tenant_id = self.context.tenant_id
         investigation_id = self.context.investigation_id
         if name == "get_solana_transaction":
+            if self._serves_live_solana(parsed):
+                return
             summaries = await succeeded_outputs(
                 conn, tenant_id, investigation_id, "get_recent_withdrawal_failures"
             )
@@ -312,6 +337,12 @@ class ToolGateway:
             if parsed.signature not in allowed:
                 raise ToolFailedError(
                     "FORBIDDEN_RESOURCE", "signature is not in the scoped failure sample"
+                )
+        elif name == "get_solana_account":
+            if not self._serves_live_solana(parsed):
+                raise ToolFailedError(
+                    "FORBIDDEN_RESOURCE",
+                    "account reads require a configured Solana cluster in the investigation scope",
                 )
         elif name == "search_application_logs":
             transactions = await succeeded_outputs(

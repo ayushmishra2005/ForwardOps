@@ -27,6 +27,9 @@ class _JsonFormatter(logging.Formatter):
             "openai_error_code",
             "openai_error_type",
             "openai_request_id",
+            "cluster",
+            "rpc_operation",
+            "result_category",
         ):
             value = getattr(record, key, None)
             if value is not None:

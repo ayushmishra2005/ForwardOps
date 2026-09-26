@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -140,6 +140,49 @@ class TransactionView(BaseModel):
         for item in value:
             require_decoded_length(item, 32)
         return value
+
+
+class GetSolanaAccountInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    address: str
+    cluster_ref: str = Field(min_length=1, max_length=64)
+
+    @field_validator("address")
+    @classmethod
+    def _address(cls, value: str) -> str:
+        require_decoded_length(value, 32)
+        return value
+
+
+class SolanaAccountView(BaseModel):
+    """Current account snapshot. historical_state is always false."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    address: str
+    cluster_ref: str
+    owner_program: str
+    lamports: int = Field(ge=0)
+    executable: bool
+    data_encoding: Literal["base64"]
+    data_length: int = Field(ge=0)
+    context_slot: int = Field(ge=0)
+    commitment: Literal["processed", "confirmed", "finalized"]
+    observed_at: datetime
+    snapshot_kind: Literal["current_account"] = "current_account"
+    historical_state: Literal[False] = False
+
+    @field_validator("address", "owner_program")
+    @classmethod
+    def _pubkey(cls, value: str) -> str:
+        require_decoded_length(value, 32)
+        return value
+
+    @field_validator("observed_at")
+    @classmethod
+    def _observed(cls, value: datetime) -> datetime:
+        return require_aware(value)
 
 
 class GetVaultStateInput(BaseModel):
