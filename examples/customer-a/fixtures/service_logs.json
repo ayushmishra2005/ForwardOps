@@ -9,7 +9,7 @@
       "level": "error",
       "event_name": "db_pool_acquire_timeout",
       "request_id": "req-checkout-01",
-      "trace_id": "trace-checkout-01",
+      "trace_id": "a11ce001a11ce001a11ce001a11ce001",
       "error_code": "db_acquisition_timeout",
       "fields": {
         "stage": "db_acquire"
@@ -21,7 +21,7 @@
       "level": "error",
       "event_name": "db_pool_acquire_timeout",
       "request_id": "req-checkout-02",
-      "trace_id": "trace-checkout-02",
+      "trace_id": "a11ce002a11ce002a11ce002a11ce002",
       "error_code": "db_acquisition_timeout",
       "fields": {
         "stage": "db_acquire"
@@ -33,7 +33,7 @@
       "level": "error",
       "event_name": "db_pool_acquire_timeout",
       "request_id": "req-checkout-03",
-      "trace_id": "trace-checkout-03",
+      "trace_id": "a11ce003a11ce003a11ce003a11ce003",
       "error_code": "db_acquisition_timeout",
       "fields": {
         "stage": "db_acquire"

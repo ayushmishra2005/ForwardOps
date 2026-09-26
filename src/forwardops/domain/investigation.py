@@ -103,6 +103,7 @@ class InvestigationScope(BaseModel):
     oracle_address: str
     scenario_id: str = STALE_ORACLE_SCENARIO
     database_source_ref: str | None = None
+    trace_source_ref: str | None = None
 
     @field_validator("scenario_id")
     @classmethod
@@ -111,13 +112,13 @@ class InvestigationScope(BaseModel):
             raise ValueError("unknown investigation scenario")
         return value
 
-    @field_validator("database_source_ref")
+    @field_validator("database_source_ref", "trace_source_ref")
     @classmethod
     def _source(cls, value: str | None) -> str | None:
         if value is None:
             return None
         if _LOGICAL_ID.fullmatch(value) is None:
-            raise ValueError("database source must be a logical identifier")
+            raise ValueError("source must be a logical identifier")
         return value
 
     def model_post_init(self, _context: object) -> None:
@@ -127,8 +128,12 @@ class InvestigationScope(BaseModel):
         require_decoded_length(self.oracle_address, 32)
         if self.scenario_id == DATABASE_POOL_SCENARIO and self.database_source_ref is None:
             raise ValueError("database investigations require a logical database source")
+        if self.scenario_id == DATABASE_POOL_SCENARIO and self.trace_source_ref is None:
+            raise ValueError("database investigations require a logical trace source")
         if self.scenario_id != DATABASE_POOL_SCENARIO and self.database_source_ref is not None:
             raise ValueError("database source is only in scope for the database playbook")
+        if self.scenario_id != DATABASE_POOL_SCENARIO and self.trace_source_ref is not None:
+            raise ValueError("trace source is only in scope for the database playbook")
 
 
 def hypothesis_template(investigation_id: UUID) -> list[dict[str, object]]:

@@ -31,6 +31,7 @@ database_scenario:
   service_ref: checkout-api
   component_ref: checkout-api
   database_source_ref: customer-db-a
+  trace_source_ref: tempo-local
   sample_cap: 3
   window:
     start: "2026-09-26T14:00:00Z"

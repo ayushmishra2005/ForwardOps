@@ -10,6 +10,8 @@ from forwardops.domain.time import MAX_WINDOW, parse_utc, require_aware
 _PRICE = r"^\d+(\.\d+)?$"
 _LOGICAL_ID = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+_TRACE_ID = re.compile(r"^[0-9a-f]{32}$")
+_SPAN_ID = re.compile(r"^[0-9a-f]{16}$")
 
 
 class WindowInput(BaseModel):
@@ -532,6 +534,92 @@ class SearchServiceLogsInput(BaseModel):
         if _REQUEST_ID.fullmatch(value) is None:
             raise ValueError("request id must be a token")
         return value
+
+
+class GetTraceInput(BaseModel):
+    """Logical trace source and one trace id. The backend URL is not an argument."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    trace_source_ref: str = Field(min_length=1, max_length=64)
+    trace_id: str
+
+    @field_validator("trace_source_ref")
+    @classmethod
+    def _source(cls, value: str) -> str:
+        return _logical_id(value)
+
+    @field_validator("trace_id")
+    @classmethod
+    def _trace(cls, value: str) -> str:
+        if _TRACE_ID.fullmatch(value) is None:
+            raise ValueError("trace id must be 32 hexadecimal characters")
+        return value
+
+
+class TraceSpanView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    span_id: str
+    parent_span_id: str | None = None
+    service_name: str = Field(min_length=1, max_length=128)
+    span_name: str = Field(min_length=1, max_length=128)
+    start_time: datetime
+    duration_ms: int = Field(ge=0)
+    status: Literal["ok", "error", "unset"]
+    error_classification: str | None = None
+    attributes: dict[str, str]
+
+    @field_validator("span_id")
+    @classmethod
+    def _span(cls, value: str) -> str:
+        if _SPAN_ID.fullmatch(value) is None:
+            raise ValueError("span id must be 16 hexadecimal characters")
+        return value
+
+    @field_validator("parent_span_id")
+    @classmethod
+    def _parent(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if _SPAN_ID.fullmatch(value) is None:
+            raise ValueError("parent span id must be 16 hexadecimal characters")
+        return value
+
+    @field_validator("start_time")
+    @classmethod
+    def _start(cls, value: datetime) -> datetime:
+        return require_aware(value)
+
+
+class TraceView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_ref: str
+    trace_id: str
+    root_service: str
+    root_operation: str
+    start_time: datetime
+    duration_ms: int = Field(ge=0)
+    status: Literal["ok", "error", "unset"]
+    spans: list[TraceSpanView]
+    service_names: list[str]
+    truncated: bool
+    span_count: int = Field(ge=0)
+    capability: Literal["get_trace"] = "get_trace"
+    capability_version: Literal["v1"] = "v1"
+
+    @field_validator("trace_id")
+    @classmethod
+    def _trace(cls, value: str) -> str:
+        if _TRACE_ID.fullmatch(value) is None:
+            raise ValueError("trace id must be 32 hexadecimal characters")
+        return value
+
+    @field_validator("start_time")
+    @classmethod
+    def _start(cls, value: datetime) -> datetime:
+        return require_aware(value)
 
 
 def coerce_datetime(value: datetime | str) -> datetime:

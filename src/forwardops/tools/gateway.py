@@ -114,6 +114,12 @@ def enforce_tool_scope(parsed: BaseModel, scope: InvestigationScope) -> None:
             "FORBIDDEN_RESOURCE",
             "database source is outside the investigation scope",
         )
+    trace_source_ref = getattr(parsed, "trace_source_ref", None)
+    if trace_source_ref is not None and trace_source_ref != scope.trace_source_ref:
+        raise ToolFailedError(
+            "FORBIDDEN_RESOURCE",
+            "trace source is outside the investigation scope",
+        )
     if window is not None:
         start = parse_utc(scope.interval_start)
         end = parse_utc(scope.interval_end)
@@ -352,6 +358,13 @@ class ToolGateway:
                 return chosen
         return definition.source_id
 
+    def _serves_trace_source(self, parsed: BaseModel) -> bool:
+        source = getattr(parsed, "trace_source_ref", None)
+        serves = getattr(self.handlers, "serves_trace_source", None)
+        if not isinstance(source, str) or serves is None:
+            return False
+        return bool(serves(source))
+
     def _serves_live_solana(self, parsed: BaseModel) -> bool:
         cluster = getattr(parsed, "cluster_ref", None)
         serves = getattr(self.handlers, "serves_solana_cluster", None)
@@ -443,6 +456,25 @@ class ToolGateway:
                 raise ToolFailedError(
                     "FORBIDDEN_RESOURCE", "request id is not in the scoped database errors"
                 )
+        elif name == "get_trace":
+            if not self._serves_trace_source(parsed):
+                raise ToolFailedError(
+                    "FORBIDDEN_RESOURCE",
+                    "no trace source is configured for this investigation",
+                )
+            logs = await succeeded_outputs(conn, tenant_id, investigation_id, "search_service_logs")
+            if logs:
+                allowed_traces = {
+                    record["trace_id"]
+                    for result in logs
+                    for record in result["records"]
+                    if isinstance(record.get("trace_id"), str)
+                }
+                if parsed.trace_id not in allowed_traces:
+                    raise ToolFailedError(
+                        "FORBIDDEN_RESOURCE",
+                        "trace id is not in the scoped service logs",
+                    )
 
     async def _reject(
         self,
@@ -542,7 +574,9 @@ def _redact(value: Any, key: str | None = None) -> Any:
 def _sensitive(key: str | None, value: str) -> bool:
     if key is not None and key.lower() in _SECRET_KEYS:
         return True
-    if key in {"source_ref", "service_ref"} and _LOGICAL_ID.fullmatch(value) is None:
+    if key in {"source_ref", "service_ref", "trace_source_ref"} and (
+        _LOGICAL_ID.fullmatch(value) is None
+    ):
         return True
     lowered = value.lower()
     return "://" in lowered or "password=" in lowered or lowered.startswith("postgres")

@@ -28,6 +28,7 @@ from forwardops.tools.contracts import (
     LogSearchResult,
     PoolSample,
     ServiceRequestSummary,
+    TraceView,
 )
 from forwardops.tools.gateway import ToolGateway
 
@@ -47,6 +48,13 @@ class RequestLog:
 
 
 @dataclass(frozen=True)
+class TraceHit:
+    evidence_id: UUID
+    view: TraceView
+    request_id: str
+
+
+@dataclass(frozen=True)
 class PoolCollected:
     complete: bool
     gap: str | None
@@ -55,6 +63,7 @@ class PoolCollected:
     errors: tuple[DatabaseErrorRecord, ...]
     error_evidence_ids: tuple[UUID, ...]
     logs: tuple[RequestLog, ...]
+    traces: tuple[TraceHit, ...]
     pool: DatabasePoolSnapshot | None
     pool_evidence_ids: tuple[UUID, ...]
 
@@ -160,6 +169,22 @@ async def _collect(gateway: ToolGateway, scope: InvestigationScope) -> PoolColle
         if len(result.records) != 1 or not result.coverage_complete:
             return _empty("log_correlation", summary, summary_call.evidence_ids[0])
         logs.append(RequestLog(log_call.evidence_ids[0], result.records[0], error.request_id))
+    traces: list[TraceHit] = []
+    for hit in logs:
+        trace_id = hit.record.trace_id
+        if not isinstance(trace_id, str) or not scope.trace_source_ref:
+            return _empty("trace_correlation", summary, summary_call.evidence_ids[0])
+        try:
+            trace_call = await gateway.call(
+                "get_trace",
+                {"trace_source_ref": scope.trace_source_ref, "trace_id": trace_id},
+            )
+        except ToolFailedError as exc:
+            return _empty(exc.code.lower(), summary, summary_call.evidence_ids[0])
+        if len(trace_call.evidence_ids) != 1:
+            raise ToolFailedError("INVALID_OUTPUT", "trace evidence did not match")
+        view = TraceView.model_validate(trace_call.output)
+        traces.append(TraceHit(trace_call.evidence_ids[0], view, hit.request_id))
     try:
         pool_call = await gateway.call(DATABASE_POOL_SNAPSHOT, {**base, "limit": POOL_LIMIT})
     except ToolFailedError as exc:
@@ -175,6 +200,7 @@ async def _collect(gateway: ToolGateway, scope: InvestigationScope) -> PoolColle
         errors=tuple(errors),
         error_evidence_ids=tuple(error_call.evidence_ids),
         logs=tuple(logs),
+        traces=tuple(traces),
         pool=pool,
         pool_evidence_ids=tuple(pool_call.evidence_ids),
     )
@@ -199,6 +225,7 @@ def _ready(collected: PoolCollected) -> bool:
         and not collected.pool.truncated
         and len(collected.errors) == len(collected.error_evidence_ids)
         and len(collected.logs) == len(collected.errors)
+        and len(collected.traces) == len(collected.logs)
         and len(collected.pool.samples) == len(collected.pool_evidence_ids)
     )
 
@@ -245,7 +272,30 @@ def _judge(collected: PoolCollected) -> _Judged | None:
         ]
         if len(matches) != 1:
             return None
+    by_trace = {hit.view.trace_id: hit for hit in collected.traces}
+    service = summary.service_ref
+    for error, hit in zip(collected.errors, collected.logs, strict=True):
+        trace_id = hit.record.trace_id
+        traced = by_trace.get(trace_id or "")
+        if (
+            traced is None
+            or traced.request_id != error.request_id
+            or not _trace_supports(traced.view, error.request_id, service)
+        ):
+            return None
     return _Judged(samples, sample_ids, at_max[0])
+
+
+def _trace_supports(view: TraceView, request_id: str, service: str) -> bool:
+    if service not in view.service_names and view.root_service != service:
+        return False
+    return any(
+        span.span_name == "db.pool.acquire"
+        and span.status == "error"
+        and span.error_classification == TIMEOUT_CODE
+        and span.attributes.get("request.id") == request_id
+        for span in view.spans
+    )
 
 
 def _at_maximum(sample: PoolSample) -> bool:
@@ -299,6 +349,7 @@ def _conclusion(
             "database_reachable": True,
             "timeout_error_code": TIMEOUT_CODE,
             "correlated_request_ids": [error.request_id for error in collected.errors],
+            "correlated_trace_ids": [hit.view.trace_id for hit in collected.traces],
         },
         confidence="high",
         confidence_basis=[
@@ -307,6 +358,7 @@ def _conclusion(
             "Pool wait duration increased during the incident window.",
             "The database remained reachable.",
             "Inspected requests emitted DB acquisition timeout errors with matching application logs.",
+            "OpenTelemetry traces show the same timeout on the checkout service pool-acquisition span.",
         ],
         alternatives=["The evidence does not establish a cause beyond pool exhaustion."],
         limitations=[
@@ -428,14 +480,23 @@ def _reachable_fact(evidence_id: UUID, component: str) -> FindingDraft:
 
 def _correlation_fact(collected: PoolCollected) -> FindingDraft:
     refs: list[EvidenceRef] = []
-    for error_id, hit in zip(collected.error_evidence_ids, collected.logs, strict=True):
+    for error_id, hit, traced in zip(
+        collected.error_evidence_ids, collected.logs, collected.traces, strict=True
+    ):
         refs.append(_ref(error_id, "/request_id"))
         refs.append(_ref(hit.evidence_id, "/request_id"))
         refs.append(_ref(hit.evidence_id, "/error_code"))
+        refs.append(_ref(traced.evidence_id, "/trace_id"))
+        pointer = _timeout_pointer(traced.view)
+        if pointer is not None:
+            refs.append(_ref(traced.evidence_id, pointer))
     return FindingDraft(
         id=uuid4(),
         classification="FACT",
-        claim="Application logs for the inspected requests record the same DB acquisition timeout.",
+        claim=(
+            "Application logs and traces for the inspected requests record "
+            "the same DB acquisition timeout."
+        ),
         component_ref=collected.summary.service_ref if collected.summary else None,
         evidence_refs=refs,
     )
@@ -459,6 +520,11 @@ def _inference_refs(
     ]
     refs.extend(_ref(evidence_id, "/error_code") for evidence_id in collected.error_evidence_ids)
     refs.extend(_ref(hit.evidence_id, "/request_id") for hit in collected.logs)
+    for traced in collected.traces:
+        refs.append(_ref(traced.evidence_id, "/trace_id"))
+        pointer = _timeout_pointer(traced.view)
+        if pointer is not None:
+            refs.append(_ref(traced.evidence_id, pointer))
     return refs
 
 
@@ -582,6 +648,13 @@ def _not_established(investigation_id: UUID, _collected: PoolCollected) -> Concl
     )
 
 
+def _timeout_pointer(view: TraceView) -> str | None:
+    for index, span in enumerate(view.spans):
+        if span.span_name == "db.pool.acquire" and span.error_classification == TIMEOUT_CODE:
+            return f"/spans/{index}/error_classification"
+    return None
+
+
 def _empty(
     gap: str,
     summary: ServiceRequestSummary | None = None,
@@ -595,6 +668,7 @@ def _empty(
         errors=(),
         error_evidence_ids=(),
         logs=(),
+        traces=(),
         pool=None,
         pool_evidence_ids=(),
     )

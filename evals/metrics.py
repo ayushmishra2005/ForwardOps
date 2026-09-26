@@ -128,6 +128,7 @@ _POOL_TOOLS = {
     "get_service_request_summary": 1,
     "get_recent_database_errors": 1,
     "search_service_logs": 3,
+    "get_trace": 3,
     "get_database_pool_snapshot": 1,
 }
 _POOL_FORBIDDEN = frozenset(
@@ -178,9 +179,13 @@ def score_database_pool(result: dict) -> dict:
         if classification == "INFERENCE":
             inference_refs.update(ref.get("evidence_id") for ref in supports)
     inference_kinds = {kinds.get(item) for item in inference_refs}
-    recalled = "application.log" in inference_kinds and bool(
-        inference_kinds
-        & {"customer.database_error", "customer.pool_sample", "service.request_summary"}
+    recalled = (
+        "application.log" in inference_kinds
+        and "observability.trace" in inference_kinds
+        and bool(
+            inference_kinds
+            & {"customer.database_error", "customer.pool_sample", "service.request_summary"}
+        )
     )
     hypothesis = investigation.get("root_cause_hypothesis") or {}
     actions = investigation.get("actions") or []

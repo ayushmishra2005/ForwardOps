@@ -103,6 +103,7 @@ def assert_database_pool(result: dict) -> None:
     assert names.count("get_service_request_summary") == 1
     assert names.count("get_recent_database_errors") == 1
     assert names.count("search_service_logs") == 3
+    assert names.count("get_trace") == 3
     assert names.count("get_database_pool_snapshot") == 1
     assert len(names) == expect["read_tool_count"]
     for forbidden in expect["forbidden_tools"]:
@@ -131,6 +132,16 @@ def assert_database_pool(result: dict) -> None:
         if item["kind"] == "application.log"
     }
     assert set(SAMPLED_REQUESTS) == error_ids == log_ids
+    traces = [item for item in result["evidence"] if item["kind"] == "observability.trace"]
+    assert len(traces) == 3
+    assert {item["payload"]["trace_id"] for item in traces} == {
+        item["payload"]["trace_id"]
+        for item in result["evidence"]
+        if item["kind"] == "application.log"
+    }
+    assert all(item["source_type"] == "observability" for item in traces)
+    assert "SELECT password FROM customers" not in blob
+    assert "tempo.internal" not in blob
     stored = result["stored_evidence"]
     assert stored
     for row in stored:

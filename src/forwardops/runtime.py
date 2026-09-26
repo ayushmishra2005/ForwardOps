@@ -10,6 +10,7 @@ from forwardops.integrations.solana import (
     SolanaEndpoint,
     SolanaHandlers,
 )
+from forwardops.integrations.tempo import TempoHandlers
 from forwardops.models.openai import OpenAIModelProvider
 from forwardops.models.provider import ModelProvider
 
@@ -58,8 +59,17 @@ def build_runtime(settings: Settings) -> Runtime:
             configured.max_rows,
             synthetic=configured.synthetic,
         )
+    tempo = None
+    if settings.tempo is not None:
+        tempo = TempoHandlers(
+            settings.tempo.source_id,
+            settings.tempo.base_url,
+            timeout_seconds=settings.tempo.timeout_seconds,
+            max_spans=settings.tempo.max_spans,
+            max_bytes=settings.tempo.max_bytes,
+        )
     return Runtime(
         settings=settings,
-        handlers=RoutingHandlers(ReplayHandlers(source, runbooks), solana, customer_db),
+        handlers=RoutingHandlers(ReplayHandlers(source, runbooks), solana, customer_db, tempo),
         model_provider=provider,
     )

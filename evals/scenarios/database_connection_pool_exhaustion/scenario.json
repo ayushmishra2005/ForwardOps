@@ -9,7 +9,7 @@
     "cause": "database_connection_pool_exhaustion",
     "component": "checkout-api",
     "confidence": "high",
-    "read_tool_count": 6,
+    "read_tool_count": 9,
     "forbidden_tools": ["get_solana_transaction", "get_recent_deployments", "execute_sql"],
     "action_count": 0
   }

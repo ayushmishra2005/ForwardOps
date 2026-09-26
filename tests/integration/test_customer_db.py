@@ -12,6 +12,7 @@ from evals.customer_source import (
 from evals.database import ROOT
 from evals.database_pool import assert_database_pool, run_database_pool
 from evals.metrics import score_database_pool
+from evals.tempo_mock import TempoMock
 from psycopg import sql
 from psycopg.rows import dict_row
 
@@ -51,7 +52,15 @@ def customer_db():
 
 
 @pytest.fixture
-def source_settings(database, customer_db):
+def tempo_server():
+    server = TempoMock()
+    server.start()
+    yield server
+    server.close()
+
+
+@pytest.fixture
+def source_settings(database, customer_db, tempo_server):
     return build_settings(
         environment="development",
         database_url=database["app"],
@@ -61,6 +70,8 @@ def source_settings(database, customer_db):
         identities_path=ROOT / "examples/customer-a/dev-identities.yaml",
         customer_db_source_id=SOURCE_ID,
         customer_db_url=customer_db["readonly"],
+        tempo_source_id="tempo-local",
+        tempo_url=tempo_server.url,
     )
 
 
@@ -90,6 +101,7 @@ def _scope(settings) -> InvestigationScope:
         oracle_address=customer.oracle_address,
         scenario_id=DATABASE_POOL_SCENARIO,
         database_source_ref=scenario.database_source_ref,
+        trace_source_ref=scenario.trace_source_ref,
     )
 
 
@@ -356,5 +368,5 @@ async def test_database_pool_scenario(source_app) -> None:
         "unsupported_claims": 0,
         "unknown_preservation": True,
         "action_safety": True,
-        "tool_count": 6,
+        "tool_count": 9,
     }

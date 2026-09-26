@@ -25,6 +25,7 @@ from forwardops.application.model_investigation import (
 from forwardops.application.playbooks.database_pool import (
     PoolCollected,
     RequestLog,
+    TraceHit,
     conclude_pool,
     pool_hypothesis_template,
 )
@@ -52,6 +53,7 @@ from forwardops.tools.contracts import (
     DatabasePoolSnapshot,
     LogSearchResult,
     ServiceRequestSummary,
+    TraceView,
 )
 from forwardops.tools.gateway import ToolGateway
 from forwardops.tools.registry import tool_definitions
@@ -323,6 +325,8 @@ def _request(
         succeeded.add("get_service_request_summary")
     if collected.errors or collected.gap == "errors_read":
         succeeded.add("get_recent_database_errors")
+    if collected.logs:
+        succeeded.add("search_service_logs")
     allowed = [
         _tool_view(definitions[name])
         for name in _allowed_names(succeeded, database_pool=True)
@@ -364,6 +368,7 @@ def _request(
         instructions=(
             f"{_INSTRUCTIONS}\n\n"
             f"source_ref={source}\n"
+            f"trace_source_ref={scope.trace_source_ref or ''}\n"
             f"service_ref={scope.service_ref}\n"
             f"window_start={scope.interval_start}\n"
             f"window_end={scope.interval_end}\n"
@@ -382,6 +387,14 @@ def _gaps(collected: PoolCollected) -> list[str]:
         return [f"Application logs for request {item} have not been read." for item in missing]
     if collected.pool is None:
         return ["Database pool samples have not been read."]
+    traced = {hit.view.trace_id for hit in collected.traces}
+    missing_traces = [
+        hit.record.trace_id
+        for hit in collected.logs
+        if isinstance(hit.record.trace_id, str) and hit.record.trace_id not in traced
+    ]
+    if missing_traces:
+        return [f"Trace {item} has not been read." for item in missing_traces]
     return []
 
 
@@ -450,6 +463,23 @@ async def _load(
         else:
             pool = None
     logged = {hit.request_id for hit in logs}
+    traces: list[TraceHit] = []
+    for item in succeeded:
+        if item["tool_name"] != "get_trace":
+            continue
+        trace_id = (item.get("arguments") or {}).get("trace_id")
+        if not isinstance(trace_id, str):
+            continue
+        trace_rows = by_call.get(item["id"], [])
+        if len(trace_rows) != 1:
+            continue
+        view = TraceView.model_validate(item["output"])
+        request_id = next(
+            (hit.request_id for hit in logs if hit.record.trace_id == trace_id),
+            "",
+        )
+        traces.append(TraceHit(trace_rows[0]["id"], view, request_id))
+    traced = {hit.view.trace_id for hit in traces}
     complete = (
         summary is not None
         and summary_id is not None
@@ -457,6 +487,9 @@ async def _load(
         and pool is not None
         and all(error.request_id in logged for error in errors)
         and len(logs) >= len(errors)
+        and all(
+            isinstance(hit.record.trace_id, str) and hit.record.trace_id in traced for hit in logs
+        )
     )
     collected = PoolCollected(
         complete=complete,
@@ -466,6 +499,7 @@ async def _load(
         errors=errors,
         error_evidence_ids=error_ids,
         logs=tuple(logs),
+        traces=tuple(traces),
         pool=pool,
         pool_evidence_ids=pool_ids,
     )

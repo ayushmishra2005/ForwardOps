@@ -42,11 +42,12 @@ class DatabaseScenarioConfig(BaseModel):
     service_ref: str = Field(min_length=1, max_length=64)
     component_ref: str = Field(min_length=1, max_length=64)
     database_source_ref: str = Field(min_length=1, max_length=64)
+    trace_source_ref: str = Field(min_length=1, max_length=64)
     sample_cap: int = Field(ge=1, le=20)
     window: WindowConfig
     frozen_observed_at: str
 
-    @field_validator("service_ref", "component_ref", "database_source_ref")
+    @field_validator("service_ref", "component_ref", "database_source_ref", "trace_source_ref")
     @classmethod
     def _logical(cls, value: str) -> str:
         if _CLUSTER_ID.fullmatch(value) is None:
@@ -84,6 +85,30 @@ class CustomerDatabaseConfig(BaseModel):
         if not (value.startswith("postgresql://") or value.startswith("postgres://")):
             raise ValueError("customer database URL must be a PostgreSQL DSN")
         return value
+
+
+class TempoSourceConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_id: str
+    base_url: str = Field(repr=False)
+    timeout_seconds: float = Field(ge=1, le=30)
+    max_spans: int = Field(ge=1, le=200)
+    max_bytes: int = Field(ge=1024, le=1_048_576)
+
+    @field_validator("source_id")
+    @classmethod
+    def _source(cls, value: str) -> str:
+        if _CLUSTER_ID.fullmatch(value) is None:
+            raise ValueError("Tempo source id must be a logical identifier")
+        return value
+
+    @field_validator("base_url")
+    @classmethod
+    def _url(cls, value: str) -> str:
+        from forwardops.integrations.tempo import require_tempo_base
+
+        return require_tempo_base(value)
 
 
 class PermittedAction(BaseModel):
@@ -242,6 +267,7 @@ class Settings(BaseModel):
     solana_timeout_seconds: float = 8
     solana_decoders: tuple[DecoderBinding, ...] = ()
     customer_database: CustomerDatabaseConfig | None = None
+    tempo: TempoSourceConfig | None = None
 
 
 def load_customer(path: Path) -> CustomerConfig:
@@ -372,6 +398,54 @@ def configured_customer_database(
         ) from None
 
 
+def configured_tempo(
+    *,
+    source_id: str | None,
+    base_url: str | None,
+    timeout_seconds: float,
+    max_spans: int,
+    max_bytes: int,
+    customer: CustomerConfig,
+) -> TempoSourceConfig | None:
+    source = (source_id or "").strip()
+    url = (base_url or "").strip()
+    if not source and not url:
+        return None
+    if not source or not url:
+        raise ConfigError("FORWARDOPS_TEMPO_SOURCE_ID and FORWARDOPS_TEMPO_URL must both be set")
+    scenario = customer.database_scenario
+    if scenario is None or source != scenario.trace_source_ref:
+        raise ConfigError("Tempo source id must match the configured scenario")
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, int | float)
+        or not 1 <= float(timeout_seconds) <= 30
+    ):
+        raise ConfigError("FORWARDOPS_TEMPO_TIMEOUT_SECONDS must be between 1 and 30")
+    if isinstance(max_spans, bool) or not isinstance(max_spans, int) or not 1 <= max_spans <= 200:
+        raise ConfigError("FORWARDOPS_TEMPO_MAX_SPANS must be between 1 and 200")
+    if (
+        isinstance(max_bytes, bool)
+        or not isinstance(max_bytes, int)
+        or not 1024 <= max_bytes <= 1_048_576
+    ):
+        raise ConfigError("FORWARDOPS_TEMPO_MAX_RESPONSE_BYTES must be between 1024 and 1048576")
+    try:
+        return TempoSourceConfig.model_validate(
+            {
+                "source_id": source,
+                "base_url": url,
+                "timeout_seconds": float(timeout_seconds),
+                "max_spans": max_spans,
+                "max_bytes": max_bytes,
+            }
+        )
+    except ValidationError:
+        raise ConfigError(
+            "Tempo configuration needs a logical source id and an http origin"
+        ) from None
+
+
 def solana_timeout(value: float) -> float:
     if isinstance(value, bool) or not isinstance(value, int | float) or not 1 <= float(value) <= 30:
         raise ConfigError("FORWARDOPS_SOLANA_TIMEOUT_SECONDS must be between 1 and 30")
@@ -420,6 +494,11 @@ def build_settings(
     customer_db_url: str | None = None,
     customer_db_statement_timeout_ms: int = 2000,
     customer_db_max_rows: int = 100,
+    tempo_source_id: str | None = None,
+    tempo_url: str | None = None,
+    tempo_timeout_seconds: float = 8,
+    tempo_max_spans: int = 32,
+    tempo_max_bytes: int = 65_536,
 ) -> Settings:
     if environment != "development":
         raise ConfigError("development authentication cannot start outside development")
@@ -458,6 +537,14 @@ def build_settings(
         migration_database_url=migration_database_url,
         customer=customer,
     )
+    tempo = configured_tempo(
+        source_id=tempo_source_id,
+        base_url=tempo_url,
+        timeout_seconds=tempo_timeout_seconds,
+        max_spans=tempo_max_spans,
+        max_bytes=tempo_max_bytes,
+        customer=customer,
+    )
     return Settings(
         environment="development",
         database_url=database_url,
@@ -486,6 +573,7 @@ def build_settings(
         solana_timeout_seconds=timeout,
         solana_decoders=solana_decoders,
         customer_database=customer_database,
+        tempo=tempo,
     )
 
 
@@ -538,6 +626,19 @@ def load_settings() -> Settings:
                 os.environ.get("FORWARDOPS_CUSTOMER_DB_MAX_ROWS"),
                 default=100,
                 name="FORWARDOPS_CUSTOMER_DB_MAX_ROWS",
+            ),
+            tempo_source_id=os.environ.get("FORWARDOPS_TEMPO_SOURCE_ID"),
+            tempo_url=os.environ.get("FORWARDOPS_TEMPO_URL"),
+            tempo_timeout_seconds=float(os.environ.get("FORWARDOPS_TEMPO_TIMEOUT_SECONDS", "8")),
+            tempo_max_spans=_bounded_int(
+                os.environ.get("FORWARDOPS_TEMPO_MAX_SPANS"),
+                default=32,
+                name="FORWARDOPS_TEMPO_MAX_SPANS",
+            ),
+            tempo_max_bytes=_bounded_int(
+                os.environ.get("FORWARDOPS_TEMPO_MAX_RESPONSE_BYTES"),
+                default=65536,
+                name="FORWARDOPS_TEMPO_MAX_RESPONSE_BYTES",
             ),
         )
     except KeyError as exc:

@@ -9,12 +9,14 @@ from forwardops.domain.investigation import InvestigationScope
 from forwardops.integrations.customer_db import CUSTOMER_DB_TOOLS, CustomerDbHandlers
 from forwardops.integrations.replay import HandlerResult, ReplayHandlers
 from forwardops.integrations.solana import SolanaHandlers
+from forwardops.integrations.tempo import GET_TRACE, TempoHandlers
 from forwardops.tools.contracts import (
     GetDatabasePoolSnapshotInput,
     GetRecentDatabaseErrorsInput,
     GetServiceRequestSummaryInput,
     GetSolanaAccountInput,
     GetSolanaTransactionInput,
+    GetTraceInput,
 )
 
 
@@ -24,10 +26,12 @@ class RoutingHandlers:
         replay: ReplayHandlers,
         solana: SolanaHandlers | None,
         customer_db: CustomerDbHandlers | None = None,
+        tempo: TempoHandlers | None = None,
     ) -> None:
         self.replay = replay
         self.solana = solana
         self.customer_db = customer_db
+        self.tempo = tempo
 
     def serves_solana_cluster(self, cluster_ref: str) -> bool:
         return self.solana is not None and self.solana.serves(cluster_ref)
@@ -44,7 +48,14 @@ class RoutingHandlers:
             source = getattr(parsed, "source_ref", None)
             if isinstance(source, str) and source:
                 return source
+        if name == GET_TRACE:
+            source = getattr(parsed, "trace_source_ref", None)
+            if isinstance(source, str) and source:
+                return source
         return None
+
+    def serves_trace_source(self, source_ref: str) -> bool:
+        return self.tempo is not None and self.tempo.serves(source_ref)
 
     async def get_solana_transaction(
         self,
@@ -87,6 +98,19 @@ class RoutingHandlers:
         arguments: GetRecentDatabaseErrorsInput,
     ) -> HandlerResult:
         return await self._customer_db().get_recent_database_errors(scope, arguments)
+
+    async def get_trace(
+        self,
+        scope: InvestigationScope,
+        arguments: GetTraceInput,
+    ) -> HandlerResult:
+        if self.tempo is None or not self.tempo.serves(arguments.trace_source_ref):
+            raise ToolFailedError(
+                "SOURCE_UNAVAILABLE",
+                "no trace source is configured for this investigation",
+                retryable=True,
+            )
+        return await self.tempo.get_trace(scope, arguments)
 
     def _customer_db(self) -> CustomerDbHandlers:
         if self.customer_db is None:

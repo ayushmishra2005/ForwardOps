@@ -24,6 +24,7 @@ from evals.model_eval import (
 )
 from evals.model_script import StaleOracleModel
 from evals.scenario import assert_stale_oracle, run_stale_oracle
+from evals.tempo_mock import TempoMock
 from forwardops.api.app import create_app
 from forwardops.config import build_settings
 from forwardops.storage.leases import open_pool
@@ -34,6 +35,20 @@ async def _main() -> int:
     truncate(admin_dsn)
     customer_admin, customer_readonly = prepare_customer_source()
     seed_customer_source(customer_admin)
+    tempo = TempoMock()
+    tempo_url = tempo.start()
+    try:
+        return await _evaluate(admin_dsn, application_dsn, customer_readonly, tempo_url)
+    finally:
+        tempo.close()
+
+
+async def _evaluate(
+    admin_dsn: str,
+    application_dsn: str,
+    customer_readonly: str,
+    tempo_url: str,
+) -> int:
     settings = build_settings(
         environment="development",
         database_url=application_dsn,
@@ -43,6 +58,8 @@ async def _main() -> int:
         identities_path=ROOT / "examples/customer-a/dev-identities.yaml",
         customer_db_source_id=SOURCE_ID,
         customer_db_url=customer_readonly,
+        tempo_source_id="tempo-local",
+        tempo_url=tempo_url,
     )
     pool = await open_pool(application_dsn)
     app = create_app(settings, pool=pool)

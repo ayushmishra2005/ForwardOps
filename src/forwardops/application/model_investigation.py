@@ -611,6 +611,8 @@ def _database_allowed(succeeded: set[str]) -> list[str]:
         names.append("get_recent_database_errors")
     if "get_recent_database_errors" in succeeded:
         names.extend(["search_service_logs", "get_database_pool_snapshot"])
+    if "search_service_logs" in succeeded:
+        names.append("get_trace")
     return names
 
 

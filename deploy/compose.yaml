@@ -28,6 +28,8 @@ services:
       FORWARDOPS_MIGRATION_DATABASE_URL: postgresql://forwardops:forwardops@postgres:5432/forwardops
       FORWARDOPS_APP_PASSWORD: forwardops_app
       FORWARDOPS_MODEL_PROVIDER: deterministic
+      FORWARDOPS_TEMPO_SOURCE_ID: tempo-local
+      FORWARDOPS_TEMPO_URL: http://tempo:3200
     ports:
       - "8000:8000"
     depends_on:
@@ -59,7 +61,34 @@ services:
       FORWARDOPS_APP_PASSWORD: forwardops_app
       FORWARDOPS_MODEL_PROVIDER: deterministic
       FORWARDOPS_POLL_SECONDS: "0.5"
+      FORWARDOPS_TEMPO_SOURCE_ID: tempo-local
+      FORWARDOPS_TEMPO_URL: http://tempo:3200
     depends_on:
       postgres:
         condition: service_healthy
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:2.7.2
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./tempo.yaml:/etc/tempo.yaml:ro
+    ports:
+      - "3200:3200"
+      - "4318:4318"
+    restart: unless-stopped
+
+  checkout-api:
+    image: python:3.12-alpine
+    working_dir: /app
+    command: ["python", "server.py"]
+    volumes:
+      - ../examples/checkout-api:/app:ro
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
+      PORT: "8080"
+    ports:
+      - "8081:8080"
+    depends_on:
+      - tempo
     restart: unless-stopped

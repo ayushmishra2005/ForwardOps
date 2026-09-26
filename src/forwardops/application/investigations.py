@@ -177,6 +177,7 @@ def _scope_for(
                 sample_cap=scenario.sample_cap,
                 scenario_id=DATABASE_POOL_SCENARIO,
                 database_source_ref=scenario.database_source_ref,
+                trace_source_ref=scenario.trace_source_ref,
                 **shared,
             ),
             DATABASE_PLAYBOOK_VERSION,
