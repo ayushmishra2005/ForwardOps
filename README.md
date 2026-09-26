@@ -13,6 +13,8 @@ One Python package serves two processes:
 
 The platform PostgreSQL database stores investigations, tool calls, evidence, findings, action proposals, approvals, audit events, and model-call metadata. The worker claims a row with `FOR UPDATE SKIP LOCKED` and a lease, so the API does not investigate inside the request. A customer investigation can also read a separate PostgreSQL database. That customer source is not the platform database. Its DSN never enters the model, the tool arguments, or the evidence.
 
+Solana historical backfill is a separate command, `forwardops-solana-ingest`. It is not an API process and it does not investigate. Python keeps the investigation path. Rust only does bounded, checkpointed ingestion.
+
 Findings are `FACT`, `INFERENCE`, or `UNKNOWN`. Facts and inferences cite evidence. The publisher outage remains unknown. The only proposal is `restart_oracle_updater`, and it stays pending until a different person approves or rejects it. `execution_enabled` is false. There is no executor.
 
 ## Deterministic mode
@@ -88,6 +90,44 @@ uv run pytest tests/integration/test_solana_gateway.py::test_live_solana_transac
 
 If those variables are unset, the test skips. CI does not set them and does not call Solana. Docker Compose does not set them either, so the demo stack stays on replay fixtures.
 
+## Solana backfill
+
+Python and Rust do different jobs.
+
+Python owns investigation orchestration, the API, policy, typed tools, model integration, and evidence reasoning. Its Solana adapter answers one `getTransaction` or `getAccountInfo` during an investigation. That adapter is unchanged.
+
+Rust owns bounded concurrent backfill: fetch a configured address over an explicit slot window, normalize the transactions it understands, write deduplicated rows, and resume from a checkpoint. The crate is `ingestion/solana`. The binary is `forwardops-solana-ingest`. There is no Rust service and no daemon.
+
+The CLI reads a logical source id from `ingestion/solana/example.config.yaml`. The RPC URL, the address allowlist, the commitment, and the cluster id come from that file. `FORWARDOPS_INGEST_DATABASE_URL` supplies the PostgreSQL URL. None of those values is a model input. The only RPC methods the client can send are `getSignaturesForAddress` and `getTransaction`. A run must set `--from-slot`, `--to-slot`, and `--max-transactions`. There is no unbounded crawl and no `getSlot` call, so the operator chooses the window.
+
+Each run also caps signature pages, in-flight fetches, retries, and the deadline. Retries use exponential backoff and honor `Retry-After` when a response sends it. A 429, a timeout, or a temporary RPC failure stays pending after the retry budget and blocks the checkpoint. A missing transaction, a malformed body, or an unsupported transaction version is stored as an explicit gap. Duplicate rows are ignored. The checkpoint moves only in the same database transaction as the rows it covers, and it does not move past an unresolved signature. A stopped run exits 2. A finished window exits 0.
+
+Normalized rows keep the signature, slot, block time when the RPC sends one, outcome, program ids, instruction errors, a capped log list, source id, cluster, commitment, ingestion time, decoder version `generic-v1`, and a SHA-256 of the raw transaction JSON. A null block time stays null. The decoder does not assign program-specific meaning. Unknown transactions stay generic records.
+
+```bash
+export FORWARDOPS_INGEST_DATABASE_URL=postgresql://forwardops:forwardops@localhost:5432/forwardops
+cargo run --manifest-path ingestion/solana/Cargo.toml --release -- \
+  --config ingestion/solana/example.config.yaml \
+  --source solana-mainnet \
+  --address 11111111111111111111111111111111 \
+  --from-slot 1 \
+  --to-slot 2000000000 \
+  --max-transactions 10
+```
+
+`list_source_records` in `src/forwardops/ingestion/records.py` can read those rows. It is not a tool and it is not an HTTP service.
+
+The benchmark in `ingestion/solana/bench/run.py` compares the CLI with a Python reference that does the same bounded fetch and the same row writes against a local mock. The mock delays every RPC response by 15 milliseconds. The workload is 60 transactions at concurrency 4. The median of 3 runs on this machine:
+
+| | Median wall clock | Throughput | Peak concurrency | Max RSS | Retries | Failures |
+| --- | --- | --- | --- | --- | --- | --- |
+| Rust CLI | 0.47s | 127.7 tx/s | 4 | 10,174,464 bytes | 0 | 0 |
+| Python reference | 0.59s | 101.7 tx/s | 4 | 43,171,840 bytes | 0 | 0 |
+
+That is one local mock, not mainnet. The wall-clock gap is small beside the artificial RPC delay. The useful property is the bound and the checkpoint, not a general speed claim.
+
+An optional live check against `https://api.mainnet-beta.solana.com` stored 10 finalized system-program transactions, including slot 450674527, with 0 gaps and 0 retries. The checkpoint stayed `in_progress` because the run stopped at `--max-transactions 10`. CI does not run that check.
+
 ## Customer PostgreSQL
 
 The platform database and a customer database are different connections. ForwardOps maps a logical source id, such as `customer-db-a`, to a DSN in its own configuration. The model cannot supply a connection string, a host, a table, or SQL.
@@ -144,6 +184,7 @@ curl -sS -D - -X POST http://127.0.0.1:8081/checkout -H 'Content-Type: applicati
 | `FORWARDOPS_SOLANA_COMMITMENT` | `finalized` | `processed`, `confirmed`, or `finalized` |
 | `FORWARDOPS_SOLANA_TIMEOUT_SECONDS` | `8` | One Solana RPC call |
 | `FORWARDOPS_SOLANA_SIGNATURE` | unset | Smoke test only. A known signature on that cluster |
+| `FORWARDOPS_INGEST_DATABASE_URL` | unset | PostgreSQL URL for `forwardops-solana-ingest`. Not a CLI flag and not a model input |
 | `FORWARDOPS_CUSTOMER_DB_SOURCE_ID` | unset | Logical id, such as `customer-db-a`. Set together with the URL |
 | `FORWARDOPS_CUSTOMER_DB_URL` | unset | PostgreSQL DSN for that source. Not a tool argument |
 | `FORWARDOPS_CUSTOMER_DB_STATEMENT_TIMEOUT_MS` | `2000` | Statement timeout for one customer read. `100` to `10000` |
@@ -279,7 +320,7 @@ With Compose Postgres published on another port:
 export TEST_DATABASE_ADMIN_URL=postgresql://forwardops:forwardops@localhost:5433/postgres
 ```
 
-`uv run ruff check src tests evals` and `uv run ruff format --check src tests evals` match CI.
+`uv run ruff check src tests evals` and `uv run ruff format --check src tests evals` match CI. The Solana backfill also runs `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test` from `ingestion/solana`. The Rust PostgreSQL test uses `TEST_DATABASE_ADMIN_URL` and skips when that variable is unset. CI sets it. CI does not call public Solana.
 
 `uv run python -m evals.runner` always runs both deterministic scenarios, stale-oracle and database connection-pool exhaustion, and a scripted prompt-injection case. It prints tool selection, evidence recall, citation validity, root cause, unsupported claims, unknown preservation, action safety, and tool count for each scenario. The pool score also reports the affected component. The pool scenario keeps the reason connection usage increased unknown, and it records no action. Model success does not replace either deterministic result.
 
@@ -302,5 +343,6 @@ export TEST_DATABASE_ADMIN_URL=postgresql://forwardops:forwardops@localhost:5433
 - One live model provider, OpenAI chat completions. The model is not an autonomous investigator.
 - The model cannot approve, execute, or widen tenant scope. Remediation stays a pending human decision, and this build has no executor.
 - Development tokens only. Production OIDC and deployment hardening are not in this slice.
-- No EVM tools, Kubernetes manifests, embeddings, Rust ingestion, or additional model providers.
+- The Solana backfill is one bounded CLI run, not a daemon. It does not open a TLS connection to PostgreSQL. Its decoder is `generic-v1` and does not interpret program logic. A run reads at most 8 signature pages, so a window below the cluster tip has to be resumed. Ingestion tables are not tenant-scoped and are not investigation tools.
+- No EVM tools, Kubernetes manifests, embeddings, or additional model providers.
 - A model can spend the tool and token budgets on unnecessary reads. Those calls are counted. They do not change the freshness predicate or the registered action.

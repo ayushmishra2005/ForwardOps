@@ -1,0 +1,9 @@
+# Operator configuration for forwardops-solana-ingest.
+# The database URL is FORWARDOPS_INGEST_DATABASE_URL, not this file.
+sources:
+  solana-mainnet:
+    cluster: mainnet-beta
+    rpc_url: https://api.mainnet-beta.solana.com
+    commitment: finalized
+    addresses:
+      - "11111111111111111111111111111111"
