@@ -1,0 +1,19 @@
+{
+  "synthetic": true,
+  "label": "customer-a fictional deployment history",
+  "source_system": "synthetic-deployments",
+  "coverage_complete": true,
+  "deployments": [
+    {
+      "deployment_id": "dep-2026-09-25-1",
+      "revision": "rev-1042",
+      "started_at": "2026-09-25T15:00:00Z",
+      "completed_at": "2026-09-25T15:06:00Z",
+      "status": "succeeded",
+      "changed_components": [
+        "withdrawal-api"
+      ],
+      "source_ref": "synthetic-deployments"
+    }
+  ]
+}

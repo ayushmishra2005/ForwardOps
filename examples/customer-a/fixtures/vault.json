@@ -1,0 +1,19 @@
+{
+  "synthetic": true,
+  "label": "customer-a fictional current vault account",
+  "source_system": "solana-fixture",
+  "vault_ref": "vault-a",
+  "address": "7WQTGkNUH6UiLT77pSvMGtGLAzK59va9z3zchkP9FzjR",
+  "owner_program": "2DS5okJQzg8MbmaSmtp378Sc297uSQu8vQEZ34pcc4iP",
+  "decoder_version": "fictional-vault-v1",
+  "oracle_ref": "oracle-a",
+  "oracle_address": "GE7ZYoTnMxGaxWeNcCoXUYWR8xcyuzTEBRcW2YdHRQ1n",
+  "paused": false,
+  "max_age_seconds": 60,
+  "freshness_comparison": "age_greater_than_max",
+  "config_version": "1",
+  "context_slot": 4200,
+  "commitment": "finalized",
+  "observed_at": "2026-09-26T12:12:00Z",
+  "snapshot_kind": "current"
+}

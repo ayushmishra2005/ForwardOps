@@ -1,0 +1,203 @@
+import os
+from pathlib import Path
+from typing import Literal
+
+import yaml
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from forwardops.domain.errors import ConfigError
+from forwardops.domain.hashing import sha256_canonical
+from forwardops.domain.identifiers import require_decoded_length
+from forwardops.domain.time import parse_utc
+
+
+class WindowConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    start: str
+    end: str
+
+    @field_validator("start", "end")
+    @classmethod
+    def _timestamp(cls, value: str) -> str:
+        parse_utc(value)
+        return value
+
+    @model_validator(mode="after")
+    def _order(self) -> "WindowConfig":
+        if parse_utc(self.start) >= parse_utc(self.end):
+            raise ValueError("window start must be before end")
+        return self
+
+
+class PermittedAction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action_type: Literal["restart_oracle_updater"]
+    incident_kind: Literal["stale_oracle"]
+    target_ref: str = Field(min_length=1, max_length=64)
+    risk: Literal["medium"]
+
+
+class CustomerConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tenant_id: str = Field(min_length=1, max_length=64)
+    display_name: str = Field(min_length=1, max_length=200)
+    data_mode: Literal["replay"]
+    service_ref: str = Field(min_length=1, max_length=64)
+    cluster_ref: str = Field(min_length=1, max_length=64)
+    vault_ref: str = Field(min_length=1, max_length=64)
+    oracle_ref: str = Field(min_length=1, max_length=64)
+    updater_target: str = Field(min_length=1, max_length=64)
+    program_id: str
+    oracle_program_id: str
+    vault_address: str
+    oracle_address: str
+    sample_cap: int = Field(ge=1, le=20)
+    window: WindowConfig
+    frozen_observed_at: str
+    question: str = Field(min_length=1, max_length=512)
+    playbook_version: str = Field(min_length=1, max_length=32)
+    policy_version: str = Field(min_length=1, max_length=32)
+    permitted_actions: list[PermittedAction] = Field(min_length=1)
+    fixture_dir: str
+    runbook_dir: str
+    proposal_ttl_seconds: int = Field(ge=60, le=7 * 24 * 3600)
+
+    @field_validator("frozen_observed_at")
+    @classmethod
+    def _frozen(cls, value: str) -> str:
+        parse_utc(value)
+        return value
+
+    @model_validator(mode="after")
+    def _identifiers(self) -> "CustomerConfig":
+        require_decoded_length(self.program_id, 32)
+        require_decoded_length(self.oracle_program_id, 32)
+        require_decoded_length(self.vault_address, 32)
+        require_decoded_length(self.oracle_address, 32)
+        for action in self.permitted_actions:
+            if action.target_ref != self.updater_target:
+                raise ValueError("permitted action target must match updater_target")
+        return self
+
+
+class Identity(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    token: str = Field(min_length=8, max_length=128)
+    principal_id: str = Field(min_length=1, max_length=64)
+    tenant_id: str = Field(min_length=1, max_length=64)
+    roles: tuple[str, ...]
+
+    @field_validator("roles")
+    @classmethod
+    def _roles(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        allowed = {"investigator", "approver"}
+        if not value or any(role not in allowed for role in value):
+            raise ValueError("roles must be investigator and/or approver")
+        return tuple(dict.fromkeys(value))
+
+
+class Settings(BaseModel):
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+
+    environment: Literal["development"]
+    database_url: str
+    migration_database_url: str
+    migrations_dir: Path
+    customer: CustomerConfig
+    fixture_dir: Path
+    runbook_dir: Path
+    identities: tuple[Identity, ...]
+    config_digest: str
+    poll_seconds: float = 0.5
+    lease_seconds: int = 60
+    max_tool_calls: int = 12
+    deadline_seconds: int = 120
+    app_password: str = "forwardops_app"
+
+
+def load_customer(path: Path) -> CustomerConfig:
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{path} must contain a mapping")
+    return CustomerConfig.model_validate(raw)
+
+
+def load_identities(path: Path) -> tuple[Identity, ...]:
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict) or not isinstance(raw.get("identities"), list):
+        raise ConfigError(f"{path} must contain an identities list")
+    identities = tuple(Identity.model_validate(item) for item in raw["identities"])
+    tokens = [item.token for item in identities]
+    if len(tokens) != len(set(tokens)):
+        raise ConfigError("development identity tokens must be unique")
+    return identities
+
+
+def _require_roles(customer: CustomerConfig, identities: tuple[Identity, ...]) -> None:
+    scoped = [item for item in identities if item.tenant_id == customer.tenant_id]
+    if not any("investigator" in item.roles for item in scoped):
+        raise ConfigError("customer tenant is missing an investigator identity")
+    if not any("approver" in item.roles for item in scoped):
+        raise ConfigError("customer tenant is missing an approver identity")
+
+
+def build_settings(
+    *,
+    environment: str,
+    database_url: str,
+    migration_database_url: str,
+    migrations_dir: Path,
+    customer_path: Path,
+    identities_path: Path,
+    poll_seconds: float = 0.5,
+    lease_seconds: int = 60,
+    app_password: str = "forwardops_app",
+) -> Settings:
+    if environment != "development":
+        raise ConfigError("development authentication cannot start outside development")
+    customer = load_customer(customer_path)
+    if customer.playbook_version != "v1":
+        raise ConfigError("this build only runs withdrawal playbook v1")
+    identities = load_identities(identities_path)
+    _require_roles(customer, identities)
+    base = customer_path.parent
+    fixture_dir = (base / customer.fixture_dir).resolve()
+    runbook_dir = (base / customer.runbook_dir).resolve()
+    if not fixture_dir.is_dir() or not runbook_dir.is_dir():
+        raise ConfigError("fixture_dir and runbook_dir must exist")
+    return Settings(
+        environment="development",
+        database_url=database_url,
+        migration_database_url=migration_database_url,
+        migrations_dir=migrations_dir,
+        customer=customer,
+        fixture_dir=fixture_dir,
+        runbook_dir=runbook_dir,
+        identities=identities,
+        config_digest=sha256_canonical(customer.model_dump(mode="python")),
+        poll_seconds=poll_seconds,
+        lease_seconds=lease_seconds,
+        app_password=app_password,
+    )
+
+
+def load_settings() -> Settings:
+    try:
+        root = Path(os.environ.get("FORWARDOPS_ROOT", Path.cwd()))
+        return build_settings(
+            environment=os.environ.get("FORWARDOPS_ENVIRONMENT", "development"),
+            database_url=os.environ["FORWARDOPS_DATABASE_URL"],
+            migration_database_url=os.environ["FORWARDOPS_MIGRATION_DATABASE_URL"],
+            migrations_dir=Path(os.environ.get("FORWARDOPS_MIGRATIONS_DIR", root / "migrations")),
+            customer_path=Path(os.environ["FORWARDOPS_CONFIG"]),
+            identities_path=Path(os.environ["FORWARDOPS_IDENTITIES"]),
+            poll_seconds=float(os.environ.get("FORWARDOPS_POLL_SECONDS", "0.5")),
+            lease_seconds=int(os.environ.get("FORWARDOPS_LEASE_SECONDS", "60")),
+            app_password=os.environ.get("FORWARDOPS_APP_PASSWORD", "forwardops_app"),
+        )
+    except KeyError as exc:
+        raise ConfigError(f"missing environment variable {exc.args[0]}") from exc

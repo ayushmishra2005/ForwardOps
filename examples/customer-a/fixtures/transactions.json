@@ -1,0 +1,101 @@
+{
+  "synthetic": true,
+  "label": "customer-a fictional vault program failures",
+  "source_system": "solana-fixture",
+  "cluster_ref": "fixture",
+  "transactions": {
+    "32DAMcoUj19vMkceHxeiaZXaXvMK1rcf2hWMUWCULAR3FMCSXWKsYVBfY4qZuuFEwar68FUUsDz98254qCXW17o3": {
+      "signature": "32DAMcoUj19vMkceHxeiaZXaXvMK1rcf2hWMUWCULAR3FMCSXWKsYVBfY4qZuuFEwar68FUUsDz98254qCXW17o3",
+      "slot": 4101,
+      "block_time": "2026-09-26T12:10:03Z",
+      "commitment": "finalized",
+      "program_ids": [
+        "2DS5okJQzg8MbmaSmtp378Sc297uSQu8vQEZ34pcc4iP"
+      ],
+      "status": "failed",
+      "instruction_errors": [
+        {
+          "index": 1,
+          "error_name": "StaleOracle"
+        }
+      ],
+      "relevant_logs": [
+        "Program log: error StaleOracle"
+      ],
+      "observed_at": "2026-09-26T12:12:00Z",
+      "decoded_failure": {
+        "oracle_ref": "oracle-a",
+        "oracle_address": "GE7ZYoTnMxGaxWeNcCoXUYWR8xcyuzTEBRcW2YdHRQ1n",
+        "last_update": "2026-09-26T12:00:00Z",
+        "execution_clock": "2026-09-26T12:10:00Z",
+        "max_age_seconds": 60,
+        "error_name": "StaleOracle",
+        "freshness_comparison": "age_greater_than_max",
+        "decoder_version": "fictional-vault-v1",
+        "withdrawal_id": "w1"
+      }
+    },
+    "3YuA8QjeYxBUPRehaDxSQkC7sKfbZVRPu25CHyFKrFJXagfmhZCVNtFz9Y1cpWrjb8eCWiiMUtaNSAqzTvJnVYqY": {
+      "signature": "3YuA8QjeYxBUPRehaDxSQkC7sKfbZVRPu25CHyFKrFJXagfmhZCVNtFz9Y1cpWrjb8eCWiiMUtaNSAqzTvJnVYqY",
+      "slot": 4102,
+      "block_time": "2026-09-26T12:10:25Z",
+      "commitment": "finalized",
+      "program_ids": [
+        "2DS5okJQzg8MbmaSmtp378Sc297uSQu8vQEZ34pcc4iP"
+      ],
+      "status": "failed",
+      "instruction_errors": [
+        {
+          "index": 1,
+          "error_name": "StaleOracle"
+        }
+      ],
+      "relevant_logs": [
+        "Program log: error StaleOracle"
+      ],
+      "observed_at": "2026-09-26T12:12:00Z",
+      "decoded_failure": {
+        "oracle_ref": "oracle-a",
+        "oracle_address": "GE7ZYoTnMxGaxWeNcCoXUYWR8xcyuzTEBRcW2YdHRQ1n",
+        "last_update": "2026-09-26T12:00:00Z",
+        "execution_clock": "2026-09-26T12:10:20Z",
+        "max_age_seconds": 60,
+        "error_name": "StaleOracle",
+        "freshness_comparison": "age_greater_than_max",
+        "decoder_version": "fictional-vault-v1",
+        "withdrawal_id": "w2"
+      }
+    },
+    "3y3GEGZR7axn7nXEArt5xNMR9R1Q15w3gs3FCWk4hrLWyCre86niu5X72mfANoxWsvPrF7gpUB83hJKVjWDfohu": {
+      "signature": "3y3GEGZR7axn7nXEArt5xNMR9R1Q15w3gs3FCWk4hrLWyCre86niu5X72mfANoxWsvPrF7gpUB83hJKVjWDfohu",
+      "slot": 4103,
+      "block_time": "2026-09-26T12:11:04Z",
+      "commitment": "finalized",
+      "program_ids": [
+        "2DS5okJQzg8MbmaSmtp378Sc297uSQu8vQEZ34pcc4iP"
+      ],
+      "status": "failed",
+      "instruction_errors": [
+        {
+          "index": 1,
+          "error_name": "StaleOracle"
+        }
+      ],
+      "relevant_logs": [
+        "Program log: error StaleOracle"
+      ],
+      "observed_at": "2026-09-26T12:12:00Z",
+      "decoded_failure": {
+        "oracle_ref": "oracle-a",
+        "oracle_address": "GE7ZYoTnMxGaxWeNcCoXUYWR8xcyuzTEBRcW2YdHRQ1n",
+        "last_update": "2026-09-26T12:00:00Z",
+        "execution_clock": "2026-09-26T12:11:00Z",
+        "max_age_seconds": 60,
+        "error_name": "StaleOracle",
+        "freshness_comparison": "age_greater_than_max",
+        "decoder_version": "fictional-vault-v1",
+        "withdrawal_id": "w3"
+      }
+    }
+  }
+}

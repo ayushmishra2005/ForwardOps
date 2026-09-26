@@ -1,0 +1,19 @@
+{
+  "name": "stale_oracle_withdrawal_failure",
+  "synthetic": true,
+  "question": "Why are vault withdrawals failing?",
+  "expect": {
+    "status": "CONCLUDED",
+    "analysis_mode": "deterministic",
+    "data_mode": "replay",
+    "cause": "stale_oracle",
+    "component": "oracle-a",
+    "confidence": "high",
+    "sample_scope": "3 sampled failed withdrawals",
+    "action_type": "restart_oracle_updater",
+    "read_tool_count": 10,
+    "forbidden_tools": ["get_recent_deployments"],
+    "execution_enabled": false,
+    "execution_status": "NOT_ENABLED"
+  }
+}

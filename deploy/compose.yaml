@@ -1,0 +1,63 @@
+# Local development passwords. Do not reuse them outside this Compose file.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: forwardops
+      POSTGRES_PASSWORD: forwardops
+      POSTGRES_DB: forwardops
+    ports:
+      - "${FORWARDOPS_POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U forwardops -d forwardops"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      FORWARDOPS_ROOT: /app
+      FORWARDOPS_ENVIRONMENT: development
+      FORWARDOPS_CONFIG: /app/examples/customer-a/config.yaml
+      FORWARDOPS_IDENTITIES: /app/examples/customer-a/dev-identities.yaml
+      FORWARDOPS_DATABASE_URL: postgresql://forwardops_app:forwardops_app@postgres:5432/forwardops
+      FORWARDOPS_MIGRATION_DATABASE_URL: postgresql://forwardops:forwardops@postgres:5432/forwardops
+      FORWARDOPS_APP_PASSWORD: forwardops_app
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready')"
+      interval: 2s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["forwardops-worker"]
+    environment:
+      FORWARDOPS_ROOT: /app
+      FORWARDOPS_ENVIRONMENT: development
+      FORWARDOPS_CONFIG: /app/examples/customer-a/config.yaml
+      FORWARDOPS_IDENTITIES: /app/examples/customer-a/dev-identities.yaml
+      FORWARDOPS_DATABASE_URL: postgresql://forwardops_app:forwardops_app@postgres:5432/forwardops
+      FORWARDOPS_MIGRATION_DATABASE_URL: postgresql://forwardops:forwardops@postgres:5432/forwardops
+      FORWARDOPS_APP_PASSWORD: forwardops_app
+      FORWARDOPS_POLL_SECONDS: "0.5"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped

@@ -1,0 +1,28 @@
+tenant_id: customer-a
+display_name: Customer A (synthetic)
+data_mode: replay
+service_ref: withdrawal-service
+cluster_ref: fixture
+vault_ref: vault-a
+oracle_ref: oracle-a
+updater_target: oracle-updater-a
+program_id: 2DS5okJQzg8MbmaSmtp378Sc297uSQu8vQEZ34pcc4iP
+oracle_program_id: BMF81XdzaePUBU8waz6TbRayNqsEVkTgqHxCboD9FFT3
+vault_address: 7WQTGkNUH6UiLT77pSvMGtGLAzK59va9z3zchkP9FzjR
+oracle_address: GE7ZYoTnMxGaxWeNcCoXUYWR8xcyuzTEBRcW2YdHRQ1n
+sample_cap: 3
+window:
+  start: "2026-09-26T12:05:00Z"
+  end: "2026-09-26T12:12:00Z"
+frozen_observed_at: "2026-09-26T12:12:00Z"
+question: "Why are vault withdrawals failing?"
+playbook_version: v1
+policy_version: v1
+permitted_actions:
+  - action_type: restart_oracle_updater
+    incident_kind: stale_oracle
+    target_ref: oracle-updater-a
+    risk: medium
+fixture_dir: fixtures
+runbook_dir: runbooks
+proposal_ttl_seconds: 86400

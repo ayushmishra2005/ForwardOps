@@ -1,0 +1,19 @@
+{
+  "synthetic": true,
+  "label": "customer-a fictional current oracle account",
+  "source_system": "solana-fixture",
+  "oracle_ref": "oracle-a",
+  "address": "GE7ZYoTnMxGaxWeNcCoXUYWR8xcyuzTEBRcW2YdHRQ1n",
+  "owner_program": "BMF81XdzaePUBU8waz6TbRayNqsEVkTgqHxCboD9FFT3",
+  "feed_id": "feed-a",
+  "price_decimal": "123.45",
+  "scale": 2,
+  "quote_unit": "USD",
+  "status": "valid",
+  "last_update": "2026-09-26T12:00:00Z",
+  "timestamp_basis": "oracle_publish_time",
+  "context_slot": 4200,
+  "commitment": "finalized",
+  "observed_at": "2026-09-26T12:12:00Z",
+  "snapshot_kind": "current"
+}

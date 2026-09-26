@@ -1,0 +1,18 @@
+# Development identities only. Production startup rejects this authentication mode.
+identities:
+  - token: dev-investigator
+    principal_id: investigator-a
+    tenant_id: customer-a
+    roles: [investigator]
+  - token: dev-approver
+    principal_id: approver-a
+    tenant_id: customer-a
+    roles: [approver]
+  - token: dev-requester-approver
+    principal_id: investigator-a
+    tenant_id: customer-a
+    roles: [investigator, approver]
+  - token: dev-investigator-b
+    principal_id: investigator-b
+    tenant_id: customer-b
+    roles: [investigator]
