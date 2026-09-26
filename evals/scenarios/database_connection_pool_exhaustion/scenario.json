@@ -1,0 +1,16 @@
+{
+  "name": "database_connection_pool_exhaustion",
+  "synthetic": true,
+  "question": "Why are checkout-api requests failing?",
+  "expect": {
+    "status": "CONCLUDED",
+    "analysis_mode": "deterministic",
+    "data_mode": "customer_postgres",
+    "cause": "database_connection_pool_exhaustion",
+    "component": "checkout-api",
+    "confidence": "high",
+    "read_tool_count": 6,
+    "forbidden_tools": ["get_solana_transaction", "get_recent_deployments", "execute_sql"],
+    "action_count": 0
+  }
+}

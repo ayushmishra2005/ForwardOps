@@ -30,6 +30,7 @@ from forwardops.tools.contracts import (
     RunbookSearchResult,
     SearchApplicationLogsInput,
     SearchRunbooksInput,
+    SearchServiceLogsInput,
     TransactionView,
     VaultState,
     WithdrawalFailureSummary,
@@ -64,6 +65,8 @@ class FixtureSource:
     oracle: dict[str, Any]
     deployments: tuple[dict[str, Any], ...]
     deployments_complete: bool
+    service_logs: tuple[dict[str, Any], ...]
+    service_logs_complete: bool
 
     @classmethod
     def load(cls, directory: Path) -> "FixtureSource":
@@ -73,6 +76,7 @@ class FixtureSource:
         vault = _read_json(directory / "vault.json")
         oracle = _read_json(directory / "oracle.json")
         deployments = _read_json(directory / "deployments.json")
+        service_logs = _read_json(directory / "service_logs.json")
         attempts = tuple(_attempt(item) for item in withdrawals["attempts"])
         return cls(
             withdrawals_label=str(withdrawals["label"]),
@@ -86,6 +90,8 @@ class FixtureSource:
             oracle=oracle,
             deployments=tuple(deployments["deployments"]),
             deployments_complete=bool(deployments["coverage_complete"]),
+            service_logs=tuple(service_logs["records"]),
+            service_logs_complete=bool(service_logs["coverage_complete"]),
         )
 
 
@@ -412,6 +418,36 @@ class ReplayHandlers:
             tuple(_runbook_observation(item) for item in result.matches),
         )
 
+    async def search_service_logs(
+        self,
+        scope: InvestigationScope,
+        arguments: SearchServiceLogsInput,
+    ) -> HandlerResult:
+        del scope
+        matched: list[LogRecord] = []
+        for raw in self.source.service_logs:
+            record = LogRecord.model_validate(raw)
+            if record.request_id != arguments.request_id:
+                continue
+            if record.event_time is None or not _in_window(
+                record.event_time,
+                arguments.window.start,
+                arguments.window.end,
+            ):
+                continue
+            matched.append(record)
+        matched.sort(key=lambda item: (item.event_time or arguments.window.start, item.event_name))
+        result = LogSearchResult(
+            service_ref=arguments.service_ref,
+            records=matched[: arguments.limit],
+            coverage_complete=self.source.service_logs_complete and len(matched) <= arguments.limit,
+        )
+        observations = tuple(
+            _service_log_observation(record, index, arguments.service_ref)
+            for index, record in enumerate(result.records)
+        )
+        return HandlerResult(dump_model(result), observations)
+
     async def get_recent_deployments(
         self,
         scope: InvestigationScope,
@@ -556,6 +592,33 @@ def _transaction_observation(view: TransactionView, scope: InvestigationScope) -
             "historical_state": "execution_log",
             "snapshot_kind": "execution_log",
         },
+        coverage={"complete_for_record": True, "truncated": False},
+    )
+
+
+def _service_log_observation(record: LogRecord, index: int, service_ref: str) -> Observation:
+    payload = record.model_dump(mode="json")
+    event_time = format_utc(record.event_time) if record.event_time else None
+    return Observation(
+        kind="application.log",
+        source_type="logs",
+        source_system="synthetic-logs",
+        source_locator={
+            "service_ref": service_ref,
+            "record_index": index,
+            "event_name": record.event_name,
+            "request_id": record.request_id,
+        },
+        event_time=event_time,
+        time_basis="application_event_time",
+        correlation={
+            "service_ref": service_ref,
+            "request_id": record.request_id,
+            "trace_id": record.trace_id,
+        },
+        payload=payload,
+        summary=f"Application log {record.event_name} for request {record.request_id}.",
+        provenance={"synthetic": True, "untrusted_text": True},
         coverage={"complete_for_record": True, "truncated": False},
     )
 

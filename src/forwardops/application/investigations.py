@@ -1,12 +1,20 @@
 from datetime import UTC, datetime
+from typing import Any
 from uuid import uuid4
 
 from psycopg.errors import UniqueViolation
 
-from forwardops.config import Settings
+from forwardops.application.playbooks.database_pool import (
+    PLAYBOOK_VERSION as DATABASE_PLAYBOOK_VERSION,
+)
+from forwardops.config import Settings, scenario_for_question
 from forwardops.domain.errors import IdempotencyConflictError, PermissionDeniedError
 from forwardops.domain.hashing import sha256_canonical, to_canonical
-from forwardops.domain.investigation import InvestigationScope
+from forwardops.domain.investigation import (
+    DATABASE_POOL_SCENARIO,
+    STALE_ORACLE_SCENARIO,
+    InvestigationScope,
+)
 from forwardops.storage.postgres import (
     Database,
     InvestigationRecord,
@@ -35,22 +43,9 @@ async def create_investigation(
     cleaned = question.strip()
     digest = sha256_canonical({"question": cleaned})
     customer = settings.customer
-    scope = to_canonical(
-        InvestigationScope(
-            service_ref=customer.service_ref,
-            vault_ref=customer.vault_ref,
-            oracle_ref=customer.oracle_ref,
-            cluster_ref=customer.cluster_ref,
-            interval_start=customer.window.start,
-            interval_end=customer.window.end,
-            sample_cap=customer.sample_cap,
-            updater_target=customer.updater_target,
-            program_id=customer.program_id,
-            oracle_program_id=customer.oracle_program_id,
-            vault_address=customer.vault_address,
-            oracle_address=customer.oracle_address,
-        )
-    )
+    scenario_name = scenario_for_question(customer, cleaned)
+    scope_model, playbook_version, data_mode = _scope_for(customer, scenario_name)
+    scope = to_canonical(scope_model)
     now = datetime.now(UTC)
     record = InvestigationRecord(
         tenant_id=tenant_id,
@@ -61,9 +56,9 @@ async def create_investigation(
         status="CREATED",
         state_version=0,
         config_digest=settings.config_digest,
-        playbook_version=customer.playbook_version,
+        playbook_version=playbook_version,
         analysis_mode=settings.analysis_mode,
-        data_mode="replay",
+        data_mode=data_mode,
         hypotheses=[],
         timeline=[],
         unknowns=[],
@@ -156,6 +151,49 @@ async def _replay(
         raise RuntimeError("idempotency conflict could not be reread")
     _check_digest(existing, digest)
     return existing, True
+
+
+def _scope_for(
+    customer: Any,
+    scenario_name: str | None,
+) -> tuple[InvestigationScope, str, str]:
+    shared = {
+        "vault_ref": customer.vault_ref,
+        "oracle_ref": customer.oracle_ref,
+        "cluster_ref": customer.cluster_ref,
+        "updater_target": customer.updater_target,
+        "program_id": customer.program_id,
+        "oracle_program_id": customer.oracle_program_id,
+        "vault_address": customer.vault_address,
+        "oracle_address": customer.oracle_address,
+    }
+    scenario = customer.database_scenario
+    if scenario_name == DATABASE_POOL_SCENARIO and scenario is not None:
+        return (
+            InvestigationScope(
+                service_ref=scenario.service_ref,
+                interval_start=scenario.window.start,
+                interval_end=scenario.window.end,
+                sample_cap=scenario.sample_cap,
+                scenario_id=DATABASE_POOL_SCENARIO,
+                database_source_ref=scenario.database_source_ref,
+                **shared,
+            ),
+            DATABASE_PLAYBOOK_VERSION,
+            "customer_postgres",
+        )
+    return (
+        InvestigationScope(
+            service_ref=customer.service_ref,
+            interval_start=customer.window.start,
+            interval_end=customer.window.end,
+            sample_cap=customer.sample_cap,
+            scenario_id=STALE_ORACLE_SCENARIO,
+            **shared,
+        ),
+        customer.playbook_version,
+        "replay",
+    )
 
 
 def _check_digest(existing: InvestigationRecord, digest: str) -> None:

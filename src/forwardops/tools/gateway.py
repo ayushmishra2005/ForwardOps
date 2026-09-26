@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -10,8 +11,9 @@ from pydantic import BaseModel, ValidationError
 from forwardops.domain.errors import SuspendedError, ToolFailedError
 from forwardops.domain.evidence import evidence_digest
 from forwardops.domain.hashing import sha256_canonical, to_canonical
-from forwardops.domain.investigation import InvestigationScope
+from forwardops.domain.investigation import DATABASE_POOL_SCENARIO, InvestigationScope
 from forwardops.domain.time import parse_utc
+from forwardops.integrations.customer_db import POOL_PLAYBOOK_TOOLS
 from forwardops.integrations.replay import HandlerResult, ReplayHandlers
 from forwardops.integrations.routing import RoutingHandlers
 from forwardops.integrations.solana import bind_rpc_log
@@ -35,6 +37,33 @@ from forwardops.tools.registry import ToolDefinition, tool_definitions
 
 logger = logging.getLogger(__name__)
 _MAX_BYTES = 65_536
+_LOGICAL_ID = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
+_SECRET_KEYS = frozenset(
+    {
+        "connection_string",
+        "database_url",
+        "dsn",
+        "host",
+        "hostname",
+        "password",
+        "query",
+        "secret",
+        "sql",
+        "statement",
+        "url",
+    }
+)
+_ORACLE_PLAYBOOK_TOOLS = frozenset(
+    {
+        "get_oracle_state",
+        "get_recent_withdrawal_failures",
+        "get_solana_account",
+        "get_solana_transaction",
+        "get_vault_state",
+        "search_application_logs",
+        "search_runbooks",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -79,11 +108,26 @@ def enforce_tool_scope(parsed: BaseModel, scope: InvestigationScope) -> None:
         raise ToolFailedError("FORBIDDEN_RESOURCE", "oracle is outside the investigation scope")
     if cluster_ref is not None and cluster_ref != scope.cluster_ref:
         raise ToolFailedError("FORBIDDEN_RESOURCE", "cluster is outside the investigation scope")
+    source_ref = getattr(parsed, "source_ref", None)
+    if source_ref is not None and source_ref != scope.database_source_ref:
+        raise ToolFailedError(
+            "FORBIDDEN_RESOURCE",
+            "database source is outside the investigation scope",
+        )
     if window is not None:
         start = parse_utc(scope.interval_start)
         end = parse_utc(scope.interval_end)
         if window.start != start or window.end != end:
             raise ToolFailedError("FORBIDDEN_RESOURCE", "window is outside the investigation scope")
+
+
+def enforce_playbook_tool(name: str, scope: InvestigationScope) -> None:
+    """Database tools are available only on the database playbook."""
+    pool = scope.scenario_id == DATABASE_POOL_SCENARIO
+    if pool and name in _ORACLE_PLAYBOOK_TOOLS:
+        raise ToolFailedError("FORBIDDEN_RESOURCE", "tool is outside the selected playbook")
+    if not pool and name in POOL_PLAYBOOK_TOOLS:
+        raise ToolFailedError("FORBIDDEN_RESOURCE", "tool is outside the selected playbook")
 
 
 class ToolGateway:
@@ -121,7 +165,7 @@ class ToolGateway:
             sha256_canonical({"tool": name, "arguments": canonical_args}),
         )
         try:
-            self._enforce_scope(parsed)
+            self._enforce_scope(definition.name, parsed)
         except ToolFailedError as exc:
             await self._reject(
                 definition, canonical_args, exc.code, str(exc), exc.retryable, logical_id
@@ -315,7 +359,8 @@ class ToolGateway:
             return False
         return bool(serves(cluster))
 
-    def _enforce_scope(self, parsed: BaseModel) -> None:
+    def _enforce_scope(self, name: str, parsed: BaseModel) -> None:
+        enforce_playbook_tool(name, self.context.scope)
         enforce_tool_scope(parsed, self.context.scope)
 
     async def _enforce_prerequisites(self, conn: Any, name: str, parsed: BaseModel) -> None:
@@ -370,6 +415,33 @@ class ToolGateway:
             if not await succeeded_outputs(conn, tenant_id, investigation_id, "get_oracle_state"):
                 raise ToolFailedError(
                     "PREREQUISITE_FAILED", "runbook search follows oracle collection"
+                )
+        elif name == "get_recent_database_errors":
+            if not await succeeded_outputs(
+                conn, tenant_id, investigation_id, "get_service_request_summary"
+            ):
+                raise ToolFailedError(
+                    "PREREQUISITE_FAILED", "request summary must be collected first"
+                )
+        elif name == "get_database_pool_snapshot":
+            if not await succeeded_outputs(
+                conn, tenant_id, investigation_id, "get_recent_database_errors"
+            ):
+                raise ToolFailedError(
+                    "PREREQUISITE_FAILED", "database errors must be collected first"
+                )
+        elif name == "search_service_logs":
+            reports = await succeeded_outputs(
+                conn, tenant_id, investigation_id, "get_recent_database_errors"
+            )
+            if not reports:
+                raise ToolFailedError(
+                    "PREREQUISITE_FAILED", "database errors must be collected first"
+                )
+            allowed = {error["request_id"] for report in reports for error in report["errors"]}
+            if parsed.request_id not in allowed:
+                raise ToolFailedError(
+                    "FORBIDDEN_RESOURCE", "request id is not in the scoped database errors"
                 )
 
     async def _reject(
@@ -451,4 +523,26 @@ def _safe_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
         return {"unparsed": True}
     if not isinstance(canonical, dict):
         return {"unparsed": True}
-    return canonical
+    redacted = _redact(canonical)
+    if not isinstance(redacted, dict):
+        return {"unparsed": True}
+    return redacted
+
+
+def _redact(value: Any, key: str | None = None) -> Any:
+    if isinstance(value, dict):
+        return {str(item_key): _redact(item, str(item_key)) for item_key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact(item, key) for item in value]
+    if isinstance(value, str) and _sensitive(key, value):
+        return "redacted"
+    return value
+
+
+def _sensitive(key: str | None, value: str) -> bool:
+    if key is not None and key.lower() in _SECRET_KEYS:
+        return True
+    if key in {"source_ref", "service_ref"} and _LOGICAL_ID.fullmatch(value) is None:
+        return True
+    lowered = value.lower()
+    return "://" in lowered or "password=" in lowered or lowered.startswith("postgres")

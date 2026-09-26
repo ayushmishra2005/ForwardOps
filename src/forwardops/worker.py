@@ -54,6 +54,9 @@ async def run_worker(settings: Settings, stop: asyncio.Event | None = None) -> N
                 except TimeoutError:
                     continue
     finally:
+        customer_db = runtime.handlers.customer_db
+        if customer_db is not None:
+            await customer_db.close()
         await pool.close()
 
 

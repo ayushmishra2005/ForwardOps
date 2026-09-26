@@ -64,7 +64,15 @@ logger = logging.getLogger(__name__)
 
 _MAX_TOOL_REQUESTS = 8
 _EVIDENCE_CHARS = 4000
-_UNTRUSTED_KINDS = frozenset({"application.log", "runbook.excerpt"})
+_UNTRUSTED_KINDS = frozenset({"application.log", "runbook.excerpt", "customer.database_error"})
+_LIMIT_CLAMP = frozenset(
+    {
+        "get_recent_withdrawal_failures",
+        "get_service_request_summary",
+        "get_recent_database_errors",
+        "search_service_logs",
+    }
+)
 _MODEL_METADATA_KEYS = (
     "request_id",
     "provider",
@@ -383,7 +391,7 @@ def _clamp_arguments(
     arguments: dict[str, Any],
     scope: InvestigationScope,
 ) -> dict[str, Any]:
-    if definition.name != "get_recent_withdrawal_failures":
+    if definition.name not in _LIMIT_CLAMP:
         return arguments
     try:
         parsed = definition.input_model.model_validate(arguments)
@@ -529,7 +537,11 @@ def _summary(row: dict[str, Any]) -> EvidenceSummary:
     if len(encoded) > _EVIDENCE_CHARS:
         payload = {"truncated": True}
     provenance = row.get("provenance") or {}
-    untrusted = row["kind"] in _UNTRUSTED_KINDS or bool(provenance.get("untrusted_text"))
+    untrusted = (
+        row["kind"] in _UNTRUSTED_KINDS
+        or bool(provenance.get("untrusted_text"))
+        or bool(provenance.get("untrusted_source"))
+    )
     return EvidenceSummary(
         evidence_id=row["id"],
         kind=row["kind"],
@@ -567,7 +579,14 @@ def _collection_gaps(evidence: list[EvidenceSummary]) -> list[str]:
     return []
 
 
-def _allowed_names(succeeded: set[str], *, live_solana: bool = False) -> list[str]:
+def _allowed_names(
+    succeeded: set[str],
+    *,
+    live_solana: bool = False,
+    database_pool: bool = False,
+) -> list[str]:
+    if database_pool:
+        return _database_allowed(succeeded)
     names = ["get_recent_withdrawal_failures", "get_recent_deployments"]
     if "get_recent_withdrawal_failures" in succeeded:
         names.append("get_solana_transaction")
@@ -584,6 +603,15 @@ def _allowed_names(succeeded: set[str], *, live_solana: bool = False) -> list[st
         if name not in ordered:
             ordered.append(name)
     return ordered
+
+
+def _database_allowed(succeeded: set[str]) -> list[str]:
+    names = ["get_service_request_summary"]
+    if "get_service_request_summary" in succeeded:
+        names.append("get_recent_database_errors")
+    if "get_recent_database_errors" in succeeded:
+        names.extend(["search_service_logs", "get_database_pool_snapshot"])
+    return names
 
 
 def _tool_view(definition: ToolDefinition) -> ToolView:

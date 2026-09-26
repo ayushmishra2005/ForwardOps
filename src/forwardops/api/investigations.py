@@ -115,10 +115,11 @@ async def get_investigation_view(
     hypothesis = None
     if root is not None and root["classification"] == "INFERENCE":
         derivation = root["derivation"] or {}
-        if derivation.get("cause") == "stale_oracle":
+        cause = derivation.get("cause")
+        if cause in {"stale_oracle", "database_connection_pool_exhaustion"}:
             hypothesis = {
                 "component": root["component_ref"],
-                "cause": "stale_oracle",
+                "cause": cause,
                 "claim": root["claim"],
                 "scope": derivation.get("scope"),
                 "finding_id": root["id"],

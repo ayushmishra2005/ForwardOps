@@ -1,14 +1,20 @@
 import logging
 from datetime import datetime, timedelta
+from typing import Any
 from uuid import UUID, uuid4
 
 from forwardops.application.model_investigation import investigate_with_model
+from forwardops.application.playbooks.database_pool import (
+    investigate_database_pool,
+    pool_hypothesis_template,
+)
 from forwardops.application.playbooks.withdrawals import ConclusionPlan, investigate_withdrawals
-from forwardops.config import Settings
+from forwardops.config import Settings, scenario_for_question
 from forwardops.domain.actions import proposal_digest
 from forwardops.domain.errors import InvalidTransitionError, LostLeaseError, SuspendedError
 from forwardops.domain.evidence import FindingDraft, resolve_json_pointer, validate_finding
 from forwardops.domain.investigation import (
+    DATABASE_POOL_SCENARIO,
     TERMINAL_STATUSES,
     InvestigationScope,
     InvestigationStatus,
@@ -93,7 +99,10 @@ async def _advance(
     if _past_deadline(investigation, runtime.settings, now):
         await _record_failure(database, claim, trace_id, "deadline exceeded")
         return
-    if investigation.tenant_id != customer.tenant_id or investigation.question != customer.question:
+    if (
+        investigation.tenant_id != customer.tenant_id
+        or scenario_for_question(customer, investigation.question) is None
+    ):
         await _persist(
             database,
             runtime.settings,
@@ -109,7 +118,7 @@ async def _advance(
             claim,
             investigation.status,
             InvestigationStatus.PLANNING,
-            hypothesis_template(investigation.id),
+            _opening_hypotheses(investigation),
             trace_id,
         )
         investigation, _now = await _load(database, claim)
@@ -153,6 +162,9 @@ async def _playbook(
 ) -> ConclusionPlan:
 
     scope = InvestigationScope.model_validate(investigation.scope)
+    expected = scenario_for_question(runtime.settings.customer, investigation.question)
+    if expected is None or scope.scenario_id != expected:
+        return _unsupported_plan(investigation.id)
     context = ToolContext(
         tenant_id=claim.tenant_id,
         principal_id=investigation.requester_id,
@@ -162,7 +174,7 @@ async def _playbook(
         trace_id=trace_id,
         lease_epoch=claim.lease_epoch,
         lease_owner=claim.lease_owner,
-        frozen_observed_at=runtime.settings.customer.frozen_observed_at,
+        frozen_observed_at=_frozen_observed_at(runtime.settings.customer, scope),
         max_tool_calls=int(
             investigation.budget.get("max_tool_calls", runtime.settings.max_tool_calls)
         ),
@@ -174,6 +186,16 @@ async def _playbook(
         context,
         suspend_after_new_tool_calls=suspend_after_new_tool_calls,
     )
+    if scope.scenario_id == DATABASE_POOL_SCENARIO:
+        if investigation.analysis_mode == "model":
+            from forwardops.application.model_database import investigate_database_with_model
+
+            return await investigate_database_with_model(
+                database, gateway, runtime, investigation, scope
+            )
+        return await investigate_database_pool(
+            gateway, scope, investigation.id, runtime.settings.customer
+        )
     if investigation.analysis_mode == "model":
         return await investigate_with_model(database, gateway, runtime, investigation, scope)
     return await investigate_withdrawals(
@@ -339,7 +361,7 @@ def _unsupported_plan(investigation_id: UUID) -> ConclusionPlan:
         component_ref=None,
         evidence_refs=[],
         confidence=None,
-        limitations=["The deployment only investigates the configured withdrawal question."],
+        limitations=["The deployment only investigates its configured questions."],
     )
     rows = hypothesis_template(investigation_id)
     for row in rows:
@@ -399,6 +421,19 @@ async def _load(database: Database, claim: Claim) -> tuple[InvestigationRecord, 
         ):
             raise LostLeaseError("investigation lease does not match this worker")
         return investigation, await db_now(conn)
+
+
+def _opening_hypotheses(investigation: InvestigationRecord) -> list:
+    if investigation.scope.get("scenario_id") == DATABASE_POOL_SCENARIO:
+        return pool_hypothesis_template(investigation.id)
+    return hypothesis_template(investigation.id)
+
+
+def _frozen_observed_at(customer: Any, scope: InvestigationScope) -> str:
+    scenario = customer.database_scenario
+    if scope.scenario_id == DATABASE_POOL_SCENARIO and scenario is not None:
+        return scenario.frozen_observed_at
+    return customer.frozen_observed_at
 
 
 def _past_deadline(investigation: InvestigationRecord, settings: Settings, now: datetime) -> bool:

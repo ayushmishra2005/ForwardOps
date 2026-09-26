@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 from typing import Any, Literal
 
@@ -7,6 +8,8 @@ from forwardops.domain.identifiers import require_decoded_length
 from forwardops.domain.time import MAX_WINDOW, parse_utc, require_aware
 
 _PRICE = r"^\d+(\.\d+)?$"
+_LOGICAL_ID = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
+_REQUEST_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 
 class WindowInput(BaseModel):
@@ -345,6 +348,190 @@ class DeploymentSearchResult(BaseModel):
 
     deployments: list[DeploymentRecord]
     coverage_complete: bool
+
+
+def _logical_id(value: str) -> str:
+    if _LOGICAL_ID.fullmatch(value) is None:
+        raise ValueError("expected a logical identifier")
+    return value
+
+
+class GetServiceRequestSummaryInput(BaseModel):
+    """Logical service, source, and window. There is no SQL, DSN, or table argument."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    service_ref: str = Field(min_length=1, max_length=64)
+    source_ref: str = Field(min_length=1, max_length=64)
+    window: WindowInput
+    limit: int = Field(default=20, ge=1, le=100)
+
+    @field_validator("service_ref", "source_ref")
+    @classmethod
+    def _ids(cls, value: str) -> str:
+        return _logical_id(value)
+
+
+class FailureCodeCount(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    error_code: str = Field(min_length=1, max_length=64)
+    failures: int = Field(ge=0)
+
+    @field_validator("error_code")
+    @classmethod
+    def _code(cls, value: str) -> str:
+        if _REQUEST_ID.fullmatch(value) is None:
+            raise ValueError("error code must be a token")
+        return value
+
+
+class ServiceRequestSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    service_ref: str
+    source_ref: str
+    window: WindowInput
+    baseline_window: WindowInput
+    incident_requests: int = Field(ge=0)
+    incident_failures: int = Field(ge=0)
+    baseline_requests: int = Field(ge=0)
+    baseline_failures: int = Field(ge=0)
+    failure_codes: list[FailureCodeCount]
+    coverage_complete: bool
+    truncated: bool
+    row_count: int = Field(ge=0)
+    capability: Literal["get_service_request_summary"] = "get_service_request_summary"
+    capability_version: Literal["v1"] = "v1"
+
+
+class GetDatabasePoolSnapshotInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    service_ref: str = Field(min_length=1, max_length=64)
+    source_ref: str = Field(min_length=1, max_length=64)
+    window: WindowInput
+    limit: int = Field(default=20, ge=1, le=100)
+
+    @field_validator("service_ref", "source_ref")
+    @classmethod
+    def _ids(cls, value: str) -> str:
+        return _logical_id(value)
+
+
+class PoolSample(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    observed_at: datetime
+    active_connections: int = Field(ge=0)
+    max_connections: int = Field(ge=1)
+    wait_duration_ms: int = Field(ge=0)
+    database_reachable: bool
+
+    @field_validator("observed_at")
+    @classmethod
+    def _observed(cls, value: datetime) -> datetime:
+        return require_aware(value)
+
+    @model_validator(mode="after")
+    def _capacity(self) -> "PoolSample":
+        if self.active_connections > self.max_connections:
+            raise ValueError("active connections exceed the configured maximum")
+        return self
+
+
+class DatabasePoolSnapshot(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    service_ref: str
+    source_ref: str
+    window: WindowInput
+    samples: list[PoolSample]
+    coverage_complete: bool
+    truncated: bool
+    row_count: int = Field(ge=0)
+    capability: Literal["get_database_pool_snapshot"] = "get_database_pool_snapshot"
+    capability_version: Literal["v1"] = "v1"
+
+
+class GetRecentDatabaseErrorsInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    service_ref: str = Field(min_length=1, max_length=64)
+    source_ref: str = Field(min_length=1, max_length=64)
+    window: WindowInput
+    request_id: str | None = Field(default=None, max_length=64)
+    limit: int = Field(default=20, ge=1, le=100)
+
+    @field_validator("service_ref", "source_ref")
+    @classmethod
+    def _ids(cls, value: str) -> str:
+        return _logical_id(value)
+
+    @field_validator("request_id")
+    @classmethod
+    def _request(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if _REQUEST_ID.fullmatch(value) is None:
+            raise ValueError("request id must be a token")
+        return value
+
+
+class DatabaseErrorRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    occurred_at: datetime
+    request_id: str = Field(min_length=1, max_length=64)
+    error_code: str = Field(min_length=1, max_length=64)
+    message: str = Field(max_length=500)
+
+    @field_validator("occurred_at")
+    @classmethod
+    def _occurred(cls, value: datetime) -> datetime:
+        return require_aware(value)
+
+    @field_validator("request_id", "error_code")
+    @classmethod
+    def _token(cls, value: str) -> str:
+        if _REQUEST_ID.fullmatch(value) is None:
+            raise ValueError("expected a token")
+        return value
+
+
+class DatabaseErrorReport(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    service_ref: str
+    source_ref: str
+    window: WindowInput
+    errors: list[DatabaseErrorRecord]
+    coverage_complete: bool
+    truncated: bool
+    row_count: int = Field(ge=0)
+    capability: Literal["get_recent_database_errors"] = "get_recent_database_errors"
+    capability_version: Literal["v1"] = "v1"
+
+
+class SearchServiceLogsInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    service_ref: str = Field(min_length=1, max_length=64)
+    window: WindowInput
+    request_id: str = Field(min_length=1, max_length=64)
+    limit: int = Field(default=20, ge=1, le=100)
+
+    @field_validator("service_ref")
+    @classmethod
+    def _service(cls, value: str) -> str:
+        return _logical_id(value)
+
+    @field_validator("request_id")
+    @classmethod
+    def _request(cls, value: str) -> str:
+        if _REQUEST_ID.fullmatch(value) is None:
+            raise ValueError("request id must be a token")
+        return value
 
 
 def coerce_datetime(value: datetime | str) -> datetime:

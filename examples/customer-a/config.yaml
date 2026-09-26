@@ -26,3 +26,13 @@ permitted_actions:
 fixture_dir: fixtures
 runbook_dir: runbooks
 proposal_ttl_seconds: 86400
+database_scenario:
+  question: "Why are checkout-api requests failing?"
+  service_ref: checkout-api
+  component_ref: checkout-api
+  database_source_ref: customer-db-a
+  sample_cap: 3
+  window:
+    start: "2026-09-26T14:00:00Z"
+    end: "2026-09-26T14:10:00Z"
+  frozen_observed_at: "2026-09-26T14:10:00Z"

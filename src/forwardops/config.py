@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from forwardops.domain.errors import ConfigError
 from forwardops.domain.hashing import sha256_canonical
 from forwardops.domain.identifiers import require_decoded_length
+from forwardops.domain.investigation import DATABASE_POOL_SCENARIO, STALE_ORACLE_SCENARIO
 from forwardops.domain.time import parse_utc
 
 
@@ -30,6 +31,59 @@ class WindowConfig(BaseModel):
         if parse_utc(self.start) >= parse_utc(self.end):
             raise ValueError("window start must be before end")
         return self
+
+
+class DatabaseScenarioConfig(BaseModel):
+    """Second deterministic scenario. The DSN is not part of this file."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    question: str = Field(min_length=1, max_length=512)
+    service_ref: str = Field(min_length=1, max_length=64)
+    component_ref: str = Field(min_length=1, max_length=64)
+    database_source_ref: str = Field(min_length=1, max_length=64)
+    sample_cap: int = Field(ge=1, le=20)
+    window: WindowConfig
+    frozen_observed_at: str
+
+    @field_validator("service_ref", "component_ref", "database_source_ref")
+    @classmethod
+    def _logical(cls, value: str) -> str:
+        if _CLUSTER_ID.fullmatch(value) is None:
+            raise ValueError("expected a logical identifier")
+        return value
+
+    @field_validator("frozen_observed_at")
+    @classmethod
+    def _frozen(cls, value: str) -> str:
+        parse_utc(value)
+        return value
+
+
+class CustomerDatabaseConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_id: str
+    dsn: str = Field(repr=False)
+    statement_timeout_ms: int = Field(ge=100, le=10_000)
+    max_rows: int = Field(ge=1, le=100)
+    synthetic: bool = True
+
+    @field_validator("source_id")
+    @classmethod
+    def _source(cls, value: str) -> str:
+        if _CLUSTER_ID.fullmatch(value) is None:
+            raise ValueError("customer database source id must be a logical identifier")
+        return value
+
+    @field_validator("dsn")
+    @classmethod
+    def _dsn(cls, value: str) -> str:
+        if any(character in value for character in "\r\n\t "):
+            raise ValueError("customer database URL must be a PostgreSQL DSN")
+        if not (value.startswith("postgresql://") or value.startswith("postgres://")):
+            raise ValueError("customer database URL must be a PostgreSQL DSN")
+        return value
 
 
 class PermittedAction(BaseModel):
@@ -66,6 +120,7 @@ class CustomerConfig(BaseModel):
     fixture_dir: str
     runbook_dir: str
     proposal_ttl_seconds: int = Field(ge=60, le=7 * 24 * 3600)
+    database_scenario: DatabaseScenarioConfig | None = None
 
     @field_validator("frozen_observed_at")
     @classmethod
@@ -82,6 +137,8 @@ class CustomerConfig(BaseModel):
         for action in self.permitted_actions:
             if action.target_ref != self.updater_target:
                 raise ValueError("permitted action target must match updater_target")
+        if self.database_scenario is not None and self.database_scenario.question == self.question:
+            raise ValueError("database scenario question must differ from the withdrawal question")
         return self
 
 
@@ -184,6 +241,7 @@ class Settings(BaseModel):
     solana_clusters: tuple[SolanaCluster, ...] = ()
     solana_timeout_seconds: float = 8
     solana_decoders: tuple[DecoderBinding, ...] = ()
+    customer_database: CustomerDatabaseConfig | None = None
 
 
 def load_customer(path: Path) -> CustomerConfig:
@@ -242,6 +300,78 @@ def configured_solana_clusters(
     return (parsed,)
 
 
+def scenario_for_question(customer: CustomerConfig, question: str) -> str | None:
+    if question == customer.question:
+        return STALE_ORACLE_SCENARIO
+    scenario = customer.database_scenario
+    if scenario is not None and question == scenario.question:
+        return DATABASE_POOL_SCENARIO
+    return None
+
+
+def _database_endpoint(dsn: str) -> tuple[str, int, str]:
+    parts = urlsplit(dsn)
+    host = (parts.hostname or "").lower()
+    if host in {"localhost", "127.0.0.1", "::1"}:
+        host = "loopback"
+    port = parts.port or 5432
+    name = parts.path.lstrip("/").split("?")[0]
+    return host, port, name
+
+
+def configured_customer_database(
+    *,
+    source_id: str | None,
+    url: str | None,
+    statement_timeout_ms: int,
+    max_rows: int,
+    database_url: str,
+    migration_database_url: str,
+    customer: CustomerConfig,
+) -> CustomerDatabaseConfig | None:
+    source = (source_id or "").strip()
+    dsn = (url or "").strip()
+    if not source and not dsn:
+        return None
+    if not source or not dsn:
+        raise ConfigError(
+            "FORWARDOPS_CUSTOMER_DB_SOURCE_ID and FORWARDOPS_CUSTOMER_DB_URL must both be set"
+        )
+    if any(
+        _database_endpoint(dsn) == _database_endpoint(existing)
+        for existing in (database_url, migration_database_url)
+    ):
+        raise ConfigError(
+            "customer database must be separate from the ForwardOps platform database"
+        )
+    scenario = customer.database_scenario
+    if scenario is None or source != scenario.database_source_ref:
+        raise ConfigError("customer database source id must match the configured scenario")
+    if (
+        isinstance(statement_timeout_ms, bool)
+        or not isinstance(statement_timeout_ms, int)
+        or not 100 <= statement_timeout_ms <= 10_000
+    ):
+        raise ConfigError(
+            "FORWARDOPS_CUSTOMER_DB_STATEMENT_TIMEOUT_MS must be between 100 and 10000"
+        )
+    if isinstance(max_rows, bool) or not isinstance(max_rows, int) or not 1 <= max_rows <= 100:
+        raise ConfigError("FORWARDOPS_CUSTOMER_DB_MAX_ROWS must be between 1 and 100")
+    try:
+        return CustomerDatabaseConfig.model_validate(
+            {
+                "source_id": source,
+                "dsn": dsn,
+                "statement_timeout_ms": statement_timeout_ms,
+                "max_rows": max_rows,
+            }
+        )
+    except ValidationError:
+        raise ConfigError(
+            "customer database configuration needs a logical source id and a PostgreSQL URL"
+        ) from None
+
+
 def solana_timeout(value: float) -> float:
     if isinstance(value, bool) or not isinstance(value, int | float) or not 1 <= float(value) <= 30:
         raise ConfigError("FORWARDOPS_SOLANA_TIMEOUT_SECONDS must be between 1 and 30")
@@ -286,6 +416,10 @@ def build_settings(
     solana_commitment: str = "finalized",
     solana_timeout_seconds: float = 8,
     solana_decoders: tuple[DecoderBinding, ...] = (),
+    customer_db_source_id: str | None = None,
+    customer_db_url: str | None = None,
+    customer_db_statement_timeout_ms: int = 2000,
+    customer_db_max_rows: int = 100,
 ) -> Settings:
     if environment != "development":
         raise ConfigError("development authentication cannot start outside development")
@@ -315,6 +449,15 @@ def build_settings(
     )
 
     require_installed_decoders(solana_decoders, INSTALLED_ACCOUNT_DECODERS)
+    customer_database = configured_customer_database(
+        source_id=customer_db_source_id,
+        url=customer_db_url,
+        statement_timeout_ms=customer_db_statement_timeout_ms,
+        max_rows=customer_db_max_rows,
+        database_url=database_url,
+        migration_database_url=migration_database_url,
+        customer=customer,
+    )
     return Settings(
         environment="development",
         database_url=database_url,
@@ -342,7 +485,17 @@ def build_settings(
         solana_clusters=solana_clusters,
         solana_timeout_seconds=timeout,
         solana_decoders=solana_decoders,
+        customer_database=customer_database,
     )
+
+
+def _bounded_int(value: str | None, *, default: int, name: str) -> int:
+    if value is None or value.strip() == "":
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        raise ConfigError(f"{name} must be an integer") from None
 
 
 def load_settings() -> Settings:
@@ -374,6 +527,18 @@ def load_settings() -> Settings:
             solana_rpc_url=os.environ.get("FORWARDOPS_SOLANA_RPC_URL"),
             solana_commitment=os.environ.get("FORWARDOPS_SOLANA_COMMITMENT", "finalized"),
             solana_timeout_seconds=float(os.environ.get("FORWARDOPS_SOLANA_TIMEOUT_SECONDS", "8")),
+            customer_db_source_id=os.environ.get("FORWARDOPS_CUSTOMER_DB_SOURCE_ID"),
+            customer_db_url=os.environ.get("FORWARDOPS_CUSTOMER_DB_URL"),
+            customer_db_statement_timeout_ms=_bounded_int(
+                os.environ.get("FORWARDOPS_CUSTOMER_DB_STATEMENT_TIMEOUT_MS"),
+                default=2000,
+                name="FORWARDOPS_CUSTOMER_DB_STATEMENT_TIMEOUT_MS",
+            ),
+            customer_db_max_rows=_bounded_int(
+                os.environ.get("FORWARDOPS_CUSTOMER_DB_MAX_ROWS"),
+                default=100,
+                name="FORWARDOPS_CUSTOMER_DB_MAX_ROWS",
+            ),
         )
     except KeyError as exc:
         raise ConfigError(f"missing environment variable {exc.args[0]}") from exc

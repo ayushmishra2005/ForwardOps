@@ -1,10 +1,15 @@
+import re
 from enum import StrEnum
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from forwardops.domain.errors import InvalidTransitionError
 from forwardops.domain.identifiers import require_decoded_length
+
+STALE_ORACLE_SCENARIO = "stale_oracle_withdrawal_failure"
+DATABASE_POOL_SCENARIO = "database_connection_pool_exhaustion"
+_LOGICAL_ID = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 
 
 class InvestigationStatus(StrEnum):
@@ -96,12 +101,34 @@ class InvestigationScope(BaseModel):
     oracle_program_id: str
     vault_address: str
     oracle_address: str
+    scenario_id: str = STALE_ORACLE_SCENARIO
+    database_source_ref: str | None = None
+
+    @field_validator("scenario_id")
+    @classmethod
+    def _scenario(cls, value: str) -> str:
+        if value not in {STALE_ORACLE_SCENARIO, DATABASE_POOL_SCENARIO}:
+            raise ValueError("unknown investigation scenario")
+        return value
+
+    @field_validator("database_source_ref")
+    @classmethod
+    def _source(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if _LOGICAL_ID.fullmatch(value) is None:
+            raise ValueError("database source must be a logical identifier")
+        return value
 
     def model_post_init(self, _context: object) -> None:
         require_decoded_length(self.program_id, 32)
         require_decoded_length(self.oracle_program_id, 32)
         require_decoded_length(self.vault_address, 32)
         require_decoded_length(self.oracle_address, 32)
+        if self.scenario_id == DATABASE_POOL_SCENARIO and self.database_source_ref is None:
+            raise ValueError("database investigations require a logical database source")
+        if self.scenario_id != DATABASE_POOL_SCENARIO and self.database_source_ref is not None:
+            raise ValueError("database source is only in scope for the database playbook")
 
 
 def hypothesis_template(investigation_id: UUID) -> list[dict[str, object]]:

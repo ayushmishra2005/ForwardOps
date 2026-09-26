@@ -30,6 +30,8 @@ class _JsonFormatter(logging.Formatter):
             "cluster",
             "rpc_operation",
             "result_category",
+            "source_id",
+            "query_capability",
         ):
             value = getattr(record, key, None)
             if value is not None:

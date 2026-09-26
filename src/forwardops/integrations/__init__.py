@@ -1,1 +1,1 @@
-"""Source adapters. Replay fixtures and the optional read-only Solana RPC adapter."""
+"""Source adapters. Replay fixtures, optional Solana RPC, and optional customer PostgreSQL."""

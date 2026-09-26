@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 from forwardops.config import Settings
+from forwardops.integrations.customer_db import CustomerDbHandlers
 from forwardops.integrations.replay import FixtureSource, ReplayHandlers, load_runbooks
 from forwardops.integrations.routing import RoutingHandlers
 from forwardops.integrations.solana import (
@@ -47,8 +48,18 @@ def build_runtime(settings: Settings) -> Runtime:
             installed_account_decoders=INSTALLED_ACCOUNT_DECODERS,
             installed_transaction_decoders=INSTALLED_TRANSACTION_DECODERS,
         )
+    customer_db = None
+    configured = settings.customer_database
+    if configured is not None:
+        customer_db = CustomerDbHandlers(
+            configured.source_id,
+            configured.dsn,
+            configured.statement_timeout_ms,
+            configured.max_rows,
+            synthetic=configured.synthetic,
+        )
     return Runtime(
         settings=settings,
-        handlers=RoutingHandlers(ReplayHandlers(source, runbooks), solana),
+        handlers=RoutingHandlers(ReplayHandlers(source, runbooks), solana, customer_db),
         model_provider=provider,
     )

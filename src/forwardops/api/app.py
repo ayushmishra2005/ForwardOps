@@ -38,9 +38,14 @@ def create_app(settings: Settings | None = None, pool: object | None = None) -> 
                 resolved.app_password,
             )
             app.state.pool = await open_pool(resolved.database_url)
-        yield
-        if owns_pool and app.state.pool is not None:
-            await app.state.pool.close()
+        try:
+            yield
+        finally:
+            customer_db = getattr(app.state.runtime.handlers, "customer_db", None)
+            if customer_db is not None:
+                await customer_db.close()
+            if owns_pool and app.state.pool is not None:
+                await app.state.pool.close()
 
     app = FastAPI(title="ForwardOps", version="0.1.0", lifespan=lifespan)
     app.state.settings = resolved

@@ -1,6 +1,7 @@
-"""Run the offline stale-oracle evaluation against PostgreSQL.
+"""Run the offline deterministic evaluations against PostgreSQL.
 
-The deterministic scenario is the baseline. A scripted prompt-injection case
+The stale-oracle scenario remains the baseline. The database pool scenario
+uses a separate customer PostgreSQL source. A scripted prompt-injection case
 always runs. The live model case runs only when a provider key is configured.
 """
 
@@ -10,8 +11,10 @@ import sys
 
 import httpx
 
+from evals.customer_source import SOURCE_ID, prepare_customer_source, seed_customer_source
 from evals.database import ROOT, prepare_database, truncate
-from evals.metrics import format_metrics, score_investigation
+from evals.database_pool import assert_database_pool, run_database_pool
+from evals.metrics import POOL_METRIC_KEYS, format_metrics, score_database_pool, score_investigation
 from evals.model_eval import (
     assert_model_assisted,
     assert_prompt_injection,
@@ -29,6 +32,8 @@ from forwardops.storage.leases import open_pool
 async def _main() -> int:
     admin_dsn, application_dsn = prepare_database("forwardops_eval")
     truncate(admin_dsn)
+    customer_admin, customer_readonly = prepare_customer_source()
+    seed_customer_source(customer_admin)
     settings = build_settings(
         environment="development",
         database_url=application_dsn,
@@ -36,6 +41,8 @@ async def _main() -> int:
         migrations_dir=ROOT / "migrations",
         customer_path=ROOT / "examples/customer-a/config.yaml",
         identities_path=ROOT / "examples/customer-a/dev-identities.yaml",
+        customer_db_source_id=SOURCE_ID,
+        customer_db_url=customer_readonly,
     )
     pool = await open_pool(application_dsn)
     app = create_app(settings, pool=pool)
@@ -50,6 +57,17 @@ async def _main() -> int:
                 print("stale_oracle_withdrawal_failure: pass")
                 print("status=CONCLUDED cause=stale_oracle execution=not_enabled")
                 print(format_metrics("deterministic", score_investigation(result)))
+                pool_result = await run_database_pool(client, app)
+                assert_database_pool(pool_result)
+                print("database_connection_pool_exhaustion: pass")
+                print("status=CONCLUDED cause=database_connection_pool_exhaustion actions=none")
+                print(
+                    format_metrics(
+                        "database_pool",
+                        score_database_pool(pool_result),
+                        keys=POOL_METRIC_KEYS,
+                    )
+                )
                 injection_provider = StaleOracleModel(inject=True)
                 injection = await run_model_investigation(
                     client,
