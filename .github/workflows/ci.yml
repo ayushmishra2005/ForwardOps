@@ -25,18 +25,19 @@ jobs:
       TEST_DATABASE_ADMIN_URL: postgresql://forwardops:forwardops@localhost:5432/postgres
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
-      - name: Install dependencies
-        run: pip install -e ".[dev]"
+          enable-cache: true
+      - name: Install dependencies from the lockfile
+        run: uv sync --frozen --all-extras
       - name: Lint
         run: |
-          ruff check src tests evals
-          ruff format --check src tests evals
+          uv run ruff check src tests evals
+          uv run ruff format --check src tests evals
       - name: Unit tests
-        run: pytest tests/unit
+        run: uv run pytest tests/unit
       - name: Integration tests
-        run: pytest tests/integration
+        run: uv run pytest tests/integration
       - name: Stale-oracle evaluation
-        run: python -m evals.runner
+        run: uv run python -m evals.runner

@@ -209,24 +209,17 @@ class SearchApplicationLogsInput(BaseModel):
 
     service_ref: str = Field(min_length=1, max_length=64)
     window: WindowInput
+    signature: str
     withdrawal_id: str | None = Field(default=None, max_length=64)
-    signature: str | None = None
     trace_id: str | None = Field(default=None, max_length=64)
     limit: int = Field(default=20, ge=1, le=100)
     cursor: str | None = Field(default=None, max_length=256)
 
     @field_validator("signature")
     @classmethod
-    def _signature(cls, value: str | None) -> str | None:
-        if value is not None:
-            require_decoded_length(value, 64)
+    def _signature(cls, value: str) -> str:
+        require_decoded_length(value, 64)
         return value
-
-    @model_validator(mode="after")
-    def _correlation(self) -> "SearchApplicationLogsInput":
-        if not any((self.withdrawal_id, self.signature, self.trace_id)):
-            raise ValueError("at least one correlation filter is required")
-        return self
 
 
 class LogRecord(BaseModel):

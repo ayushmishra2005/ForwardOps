@@ -1,5 +1,5 @@
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from uuid import UUID, uuid4
 
 from forwardops.application.playbooks.withdrawals import ConclusionPlan, investigate_withdrawals
@@ -28,9 +28,9 @@ from forwardops.storage.postgres import (
     insert_action,
     insert_audit,
     insert_finding,
-    lease_matches,
     mark_failed,
     release_lease,
+    require_live_lease,
     save_conclusion,
     transition_status,
 )
@@ -83,13 +83,13 @@ async def _advance(
     suspend_after_new_tool_calls: int | None,
     trace_id: str,
 ) -> None:
-    investigation = await _load(database, claim)
+    investigation, now = await _load(database, claim)
     if investigation.status in TERMINAL_STATUSES:
         async with database.transaction(claim.tenant_id) as conn:
             await release_lease(conn, claim)
         return
     customer = runtime.settings.customer
-    if _past_deadline(investigation, runtime.settings):
+    if _past_deadline(investigation, runtime.settings, now):
         await _record_failure(database, claim, trace_id, "deadline exceeded")
         return
     if investigation.tenant_id != customer.tenant_id or investigation.question != customer.question:
@@ -111,7 +111,7 @@ async def _advance(
             hypothesis_template(investigation.id),
             trace_id,
         )
-        investigation = await _load(database, claim)
+        investigation, _now = await _load(database, claim)
     if investigation.status == InvestigationStatus.PLANNING:
         await _transition(
             database,
@@ -121,7 +121,7 @@ async def _advance(
             None,
             trace_id,
         )
-        investigation = await _load(database, claim)
+        investigation, _now = await _load(database, claim)
     plan: ConclusionPlan | None = None
     if investigation.status == InvestigationStatus.COLLECTING_EVIDENCE:
         plan = await _playbook(
@@ -135,7 +135,7 @@ async def _advance(
             None,
             trace_id,
         )
-        investigation = await _load(database, claim)
+        investigation, _now = await _load(database, claim)
     if investigation.status == InvestigationStatus.ANALYZING:
         if plan is None:
             plan = await _playbook(database, runtime, claim, investigation, None, trace_id)
@@ -163,6 +163,7 @@ async def _playbook(
         lease_owner=claim.lease_owner,
         frozen_observed_at=runtime.settings.customer.frozen_observed_at,
         max_tool_calls=runtime.settings.max_tool_calls,
+        lease_seconds=runtime.settings.lease_seconds,
     )
     gateway = ToolGateway(
         database,
@@ -185,8 +186,7 @@ async def _persist(
 ) -> None:
     assert_transition(InvestigationStatus(investigation.status), InvestigationStatus(plan.status))
     async with database.transaction(claim.tenant_id) as conn:
-        if not await lease_matches(conn, claim):
-            raise LostLeaseError("lost the investigation lease before saving a conclusion")
+        await require_live_lease(conn, claim)
         if await count_findings(conn, claim.tenant_id, claim.investigation_id):
             raise RuntimeError("findings already exist for this investigation")
         stored = await evidence_payloads(conn, claim.tenant_id, claim.investigation_id)
@@ -359,8 +359,7 @@ async def _transition(
 ) -> None:
     assert_transition(InvestigationStatus(current), new)
     async with database.transaction(claim.tenant_id) as conn:
-        if not await lease_matches(conn, claim):
-            raise LostLeaseError("lost the investigation lease")
+        await require_live_lease(conn, claim)
         await transition_status(conn, claim, current=current, new=new.value, hypotheses=hypotheses)
         await insert_audit(
             conn,
@@ -381,7 +380,7 @@ async def _transition(
         )
 
 
-async def _load(database: Database, claim: Claim) -> InvestigationRecord:
+async def _load(database: Database, claim: Claim) -> tuple[InvestigationRecord, datetime]:
     async with database.transaction(claim.tenant_id) as conn:
         investigation = await get_investigation(conn, claim.tenant_id, claim.investigation_id)
         if (
@@ -390,12 +389,12 @@ async def _load(database: Database, claim: Claim) -> InvestigationRecord:
             or investigation.lease_owner != claim.lease_owner
         ):
             raise LostLeaseError("investigation lease does not match this worker")
-        return investigation
+        return investigation, await db_now(conn)
 
 
-def _past_deadline(investigation: InvestigationRecord, settings: Settings) -> bool:
+def _past_deadline(investigation: InvestigationRecord, settings: Settings, now: datetime) -> bool:
     seconds = int(investigation.budget.get("deadline_seconds", settings.deadline_seconds))
-    return datetime.now(UTC) > investigation.created_at + timedelta(seconds=seconds)
+    return now > investigation.created_at + timedelta(seconds=seconds)
 
 
 async def _record_failure(

@@ -163,15 +163,45 @@ async def get_by_idempotency(
     return None if row is None else _investigation(row)
 
 
-async def lease_matches(conn: Any, claim: Claim) -> bool:
+async def require_live_lease(conn: Any, claim: Claim, *, renew_seconds: int | None = None) -> None:
+    """Lock the investigation and keep the lock for the rest of this transaction.
+
+    Ownership, epoch, and expiry are read from the locked row. A stale worker
+    cannot insert evidence or complete a tool call after another worker has
+    claimed the lease, and a claim cannot land between this check and the
+    writes that follow in the same transaction.
+    """
     cursor = await conn.execute(
         """
-        SELECT 1 FROM investigations
-        WHERE tenant_id = %s AND id = %s AND lease_epoch = %s AND lease_owner = %s
+        SELECT
+          lease_owner,
+          lease_epoch,
+          lease_expires_at > clock_timestamp() AS lease_live
+        FROM investigations
+        WHERE tenant_id = %s AND id = %s
+        FOR UPDATE
         """,
-        (claim.tenant_id, claim.investigation_id, claim.lease_epoch, claim.lease_owner),
+        (claim.tenant_id, claim.investigation_id),
     )
-    return await cursor.fetchone() is not None
+    row = await cursor.fetchone()
+    if (
+        row is None
+        or row["lease_owner"] != claim.lease_owner
+        or row["lease_epoch"] != claim.lease_epoch
+        or row["lease_live"] is not True
+    ):
+        raise LostLeaseError("lost the investigation lease")
+    if renew_seconds is None:
+        return
+    await conn.execute(
+        """
+        UPDATE investigations
+        SET lease_expires_at = clock_timestamp() + make_interval(secs => %s),
+            updated_at = clock_timestamp()
+        WHERE tenant_id = %s AND id = %s
+        """,
+        (renew_seconds, claim.tenant_id, claim.investigation_id),
+    )
 
 
 async def transition_status(
@@ -189,7 +219,9 @@ async def transition_status(
             state_version = state_version + 1,
             hypotheses = COALESCE(%s::jsonb, hypotheses),
             updated_at = clock_timestamp()
-        WHERE tenant_id = %s AND id = %s AND lease_epoch = %s AND lease_owner = %s AND status = %s
+        WHERE tenant_id = %s AND id = %s
+          AND lease_epoch = %s AND lease_owner = %s AND status = %s
+          AND lease_expires_at > clock_timestamp()
         RETURNING id
         """,
         (
@@ -217,7 +249,9 @@ async def mark_failed(conn: Any, claim: Claim, *, current: str, failure: dict[st
             updated_at = clock_timestamp(),
             lease_owner = NULL,
             lease_expires_at = NULL
-        WHERE tenant_id = %s AND id = %s AND lease_epoch = %s AND lease_owner = %s AND status = %s
+        WHERE tenant_id = %s AND id = %s
+          AND lease_epoch = %s AND lease_owner = %s AND status = %s
+          AND lease_expires_at > clock_timestamp()
         RETURNING id
         """,
         (
@@ -265,7 +299,9 @@ async def save_conclusion(
             updated_at = clock_timestamp(),
             lease_owner = NULL,
             lease_expires_at = NULL
-        WHERE tenant_id = %s AND id = %s AND lease_epoch = %s AND lease_owner = %s AND status = %s
+        WHERE tenant_id = %s AND id = %s
+          AND lease_epoch = %s AND lease_owner = %s AND status = %s
+          AND lease_expires_at > clock_timestamp()
         RETURNING id
         """,
         (

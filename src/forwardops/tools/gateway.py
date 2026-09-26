@@ -7,7 +7,7 @@ from uuid import UUID, uuid4, uuid5
 
 from pydantic import BaseModel, ValidationError
 
-from forwardops.domain.errors import LostLeaseError, SuspendedError, ToolFailedError
+from forwardops.domain.errors import SuspendedError, ToolFailedError
 from forwardops.domain.evidence import evidence_digest
 from forwardops.domain.hashing import sha256_canonical, to_canonical
 from forwardops.domain.investigation import InvestigationScope
@@ -25,8 +25,8 @@ from forwardops.storage.postgres import (
     find_succeeded_call,
     insert_evidence,
     insert_tool_call,
-    lease_matches,
     next_attempt,
+    require_live_lease,
     succeeded_outputs,
 )
 from forwardops.tools.registry import ToolDefinition, tool_definitions
@@ -47,6 +47,7 @@ class ToolContext:
     lease_owner: str
     frozen_observed_at: str
     max_tool_calls: int
+    lease_seconds: int
 
     @property
     def claim(self) -> Claim:
@@ -106,8 +107,9 @@ class ToolGateway:
 
         started: tuple[UUID, int] | None = None
         async with self.database.transaction(self.context.tenant_id) as conn:
-            if not await lease_matches(conn, self.context.claim):
-                raise LostLeaseError("lost the investigation lease before a tool call")
+            await require_live_lease(
+                conn, self.context.claim, renew_seconds=self.context.lease_seconds
+            )
             existing = await find_succeeded_call(
                 conn,
                 self.context.tenant_id,
@@ -189,13 +191,39 @@ class ToolGateway:
             await self._fail_started(tool_call_id, failed)
             raise failed from exc
 
+        evidence_ids = await self.publish_result(tool_call_id, output, tuple(handled.observations))
+        self.new_calls += 1
+        logger.info(
+            "tool completed",
+            extra={
+                "investigation_id": str(self.context.investigation_id),
+                "tool_name": name,
+                "event": "tool_completed",
+                "tenant_id": self.context.tenant_id,
+            },
+        )
+        if (
+            self.suspend_after_new_tool_calls is not None
+            and self.new_calls >= self.suspend_after_new_tool_calls
+        ):
+            raise SuspendedError("worker suspended after a committed tool call")
+        return ToolSuccess(name, tool_call_id, output, evidence_ids, False)
+
+    async def publish_result(
+        self,
+        tool_call_id: UUID,
+        output: dict[str, Any],
+        observations: tuple[Any, ...],
+    ) -> list[UUID]:
+        """Persist tool evidence only while this worker still owns a live lease."""
         evidence_ids: list[UUID] = []
         async with self.database.transaction(self.context.tenant_id) as conn:
-            if not await lease_matches(conn, self.context.claim):
-                raise LostLeaseError("lost the investigation lease before publishing tool output")
+            await require_live_lease(
+                conn, self.context.claim, renew_seconds=self.context.lease_seconds
+            )
             observed_at = parse_utc(self.context.frozen_observed_at)
             base = await db_now(conn)
-            for index, observation in enumerate(handled.observations):
+            for index, observation in enumerate(observations):
                 evidence_id = uuid4()
                 self._check_size(observation.payload)
                 digest = evidence_digest(
@@ -237,22 +265,7 @@ class ToolGateway:
                 output=output,
                 output_digest=sha256_canonical(output),
             )
-        self.new_calls += 1
-        logger.info(
-            "tool completed",
-            extra={
-                "investigation_id": str(self.context.investigation_id),
-                "tool_name": name,
-                "event": "tool_completed",
-                "tenant_id": self.context.tenant_id,
-            },
-        )
-        if (
-            self.suspend_after_new_tool_calls is not None
-            and self.new_calls >= self.suspend_after_new_tool_calls
-        ):
-            raise SuspendedError("worker suspended after a committed tool call")
-        return ToolSuccess(name, tool_call_id, output, evidence_ids, False)
+        return evidence_ids
 
     async def _invoke(self, definition: ToolDefinition, parsed: BaseModel) -> HandlerResult:
         method = getattr(self.handlers, definition.name)
@@ -343,8 +356,9 @@ class ToolGateway:
         if logical_id is None:
             logical_id = uuid5(self.context.investigation_id, f"{definition.name}:{uuid4()}")
         async with self.database.transaction(self.context.tenant_id) as conn:
-            if not await lease_matches(conn, self.context.claim):
-                raise LostLeaseError("lost the investigation lease")
+            await require_live_lease(
+                conn, self.context.claim, renew_seconds=self.context.lease_seconds
+            )
             await self._insert_terminal(
                 conn, definition, arguments, logical_id, code, message, retryable
             )
@@ -385,8 +399,9 @@ class ToolGateway:
 
     async def _fail_started(self, tool_call_id: UUID, exc: ToolFailedError) -> None:
         async with self.database.transaction(self.context.tenant_id) as conn:
-            if not await lease_matches(conn, self.context.claim):
-                raise LostLeaseError("lost the investigation lease while recording a tool failure")
+            await require_live_lease(
+                conn, self.context.claim, renew_seconds=self.context.lease_seconds
+            )
             await fail_tool_call(
                 conn,
                 tenant_id=self.context.tenant_id,

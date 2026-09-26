@@ -205,3 +205,56 @@ async def test_equality_boundary_does_not_conclude_stale() -> None:
     assert plan.status == "INCONCLUSIVE"
     assert plan.proposal is None
     assert all((item.derivation or {}).get("cause") != "stale_oracle" for item in plan.findings)
+
+
+async def test_historical_oracle_age_ignores_a_newer_current_snapshot() -> None:
+    settings = _settings()
+    collected, scope, runbooks = await _collect(settings)
+    assert collected.oracle is not None
+    historical = collected.samples[0].transaction.decoded_failure
+    assert historical is not None
+    assert historical.execution_clock == parse_utc("2026-09-26T12:10:00Z")
+    assert historical.last_update == parse_utc("2026-09-26T12:00:00Z")
+    current_update = parse_utc("2026-09-26T12:11:30Z")
+    shifted = replace(
+        collected,
+        oracle=collected.oracle.model_copy(update={"last_update": current_update}),
+    )
+    wrong_clock = compare_oracle_age(historical.execution_clock, current_update, 60)
+    assert wrong_clock is None
+    assessed = assess(shifted, scope, uuid4())
+    assert isinstance(assessed, StaleAssessment)
+    assert assessed.comparisons[0].comparison.expression == "600 > 60"
+    assert assessed.comparisons[0].comparison.age_seconds == 600
+    runbook = next(item for item in runbooks if item.runbook_id == "oracle-staleness")
+    plan = build_stale_plan(
+        assessed,
+        scope,
+        uuid4(),
+        RunbookMatch(
+            runbook_id=runbook.runbook_id,
+            version=runbook.version,
+            title=runbook.title,
+            digest=runbook.digest,
+            section_id=runbook.section_id,
+            excerpt=runbook.body,
+            service_ref=runbook.service_ref,
+            component_ref=runbook.component_ref,
+            incident_kind=runbook.incident_kind,
+            owner=runbook.owner,
+            review_status=runbook.review_status,
+        ),
+        shifted.oracle_evidence_id,
+        settings.customer.permitted_actions[0],
+        settings.customer.policy_version,
+    )
+    inference = next(item for item in plan.findings if item.classification == "INFERENCE")
+    assert inference.derivation is not None
+    assert inference.derivation["comparisons"][0]["expression"] == "600 > 60"
+    oracle_refs = [
+        ref for ref in inference.evidence_refs if ref.evidence_id == shifted.oracle_evidence_id
+    ]
+    assert oracle_refs
+    assert all(
+        ref.relation == "context" and ref.json_pointer == "/snapshot_kind" for ref in oracle_refs
+    )
