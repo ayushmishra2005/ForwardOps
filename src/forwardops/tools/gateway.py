@@ -63,6 +63,27 @@ class ToolSuccess:
     reused: bool
 
 
+def enforce_tool_scope(parsed: BaseModel, scope: InvestigationScope) -> None:
+    service_ref = getattr(parsed, "service_ref", None)
+    vault_ref = getattr(parsed, "vault_ref", None)
+    oracle_ref = getattr(parsed, "oracle_ref", None)
+    cluster_ref = getattr(parsed, "cluster_ref", None)
+    window = getattr(parsed, "window", None)
+    if service_ref is not None and service_ref != scope.service_ref:
+        raise ToolFailedError("FORBIDDEN_RESOURCE", "service is outside the investigation scope")
+    if vault_ref is not None and vault_ref != scope.vault_ref:
+        raise ToolFailedError("FORBIDDEN_RESOURCE", "vault is outside the investigation scope")
+    if oracle_ref is not None and oracle_ref != scope.oracle_ref:
+        raise ToolFailedError("FORBIDDEN_RESOURCE", "oracle is outside the investigation scope")
+    if cluster_ref is not None and cluster_ref != scope.cluster_ref:
+        raise ToolFailedError("FORBIDDEN_RESOURCE", "cluster is outside the investigation scope")
+    if window is not None:
+        start = parse_utc(scope.interval_start)
+        end = parse_utc(scope.interval_end)
+        if window.start != start or window.end != end:
+            raise ToolFailedError("FORBIDDEN_RESOURCE", "window is outside the investigation scope")
+
+
 class ToolGateway:
     """The only path from the playbook to a tool handler."""
 
@@ -272,31 +293,7 @@ class ToolGateway:
         return await method(self.context.scope, parsed)
 
     def _enforce_scope(self, parsed: BaseModel) -> None:
-        scope = self.context.scope
-        service_ref = getattr(parsed, "service_ref", None)
-        vault_ref = getattr(parsed, "vault_ref", None)
-        oracle_ref = getattr(parsed, "oracle_ref", None)
-        cluster_ref = getattr(parsed, "cluster_ref", None)
-        window = getattr(parsed, "window", None)
-        if service_ref is not None and service_ref != scope.service_ref:
-            raise ToolFailedError(
-                "FORBIDDEN_RESOURCE", "service is outside the investigation scope"
-            )
-        if vault_ref is not None and vault_ref != scope.vault_ref:
-            raise ToolFailedError("FORBIDDEN_RESOURCE", "vault is outside the investigation scope")
-        if oracle_ref is not None and oracle_ref != scope.oracle_ref:
-            raise ToolFailedError("FORBIDDEN_RESOURCE", "oracle is outside the investigation scope")
-        if cluster_ref is not None and cluster_ref != scope.cluster_ref:
-            raise ToolFailedError(
-                "FORBIDDEN_RESOURCE", "cluster is outside the investigation scope"
-            )
-        if window is not None:
-            start = parse_utc(scope.interval_start)
-            end = parse_utc(scope.interval_end)
-            if window.start != start or window.end != end:
-                raise ToolFailedError(
-                    "FORBIDDEN_RESOURCE", "window is outside the investigation scope"
-                )
+        enforce_tool_scope(parsed, self.context.scope)
 
     async def _enforce_prerequisites(self, conn: Any, name: str, parsed: BaseModel) -> None:
         tenant_id = self.context.tenant_id

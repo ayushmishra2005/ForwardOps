@@ -55,3 +55,11 @@ class ToolFailedError(ForwardOpsError):
         super().__init__(message)
         self.code = code
         self.retryable = retryable
+
+
+class ModelError(ForwardOpsError):
+    """A provider failed or returned output the application will not use."""
+
+    def __init__(self, category: str, message: str) -> None:
+        super().__init__(message)
+        self.category = category

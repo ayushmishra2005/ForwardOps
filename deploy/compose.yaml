@@ -27,6 +27,7 @@ services:
       FORWARDOPS_DATABASE_URL: postgresql://forwardops_app:forwardops_app@postgres:5432/forwardops
       FORWARDOPS_MIGRATION_DATABASE_URL: postgresql://forwardops:forwardops@postgres:5432/forwardops
       FORWARDOPS_APP_PASSWORD: forwardops_app
+      FORWARDOPS_MODEL_PROVIDER: deterministic
     ports:
       - "8000:8000"
     depends_on:
@@ -56,6 +57,7 @@ services:
       FORWARDOPS_DATABASE_URL: postgresql://forwardops_app:forwardops_app@postgres:5432/forwardops
       FORWARDOPS_MIGRATION_DATABASE_URL: postgresql://forwardops:forwardops@postgres:5432/forwardops
       FORWARDOPS_APP_PASSWORD: forwardops_app
+      FORWARDOPS_MODEL_PROVIDER: deterministic
       FORWARDOPS_POLL_SECONDS: "0.5"
     depends_on:
       postgres:

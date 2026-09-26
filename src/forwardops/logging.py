@@ -12,10 +12,27 @@ class _JsonFormatter(logging.Formatter):
             "logger": record.name,
             "message": record.getMessage(),
         }
-        for key in ("tenant_id", "investigation_id", "tool_name", "event"):
+        for key in (
+            "tenant_id",
+            "investigation_id",
+            "tool_name",
+            "event",
+            "provider",
+            "model",
+            "request_id",
+            "duration_ms",
+            "token_usage",
+            "finish_reason",
+            "http_status",
+            "openai_error_code",
+            "openai_error_type",
+            "openai_request_id",
+        ):
             value = getattr(record, key, None)
             if value is not None:
                 payload[key] = value
+        if hasattr(record, "error_category"):
+            payload["error_category"] = record.error_category
         if record.exc_info and record.exc_info[0] is not None:
             payload["exception_type"] = record.exc_info[0].__name__
         return json.dumps(payload, default=str)

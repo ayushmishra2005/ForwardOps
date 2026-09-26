@@ -117,6 +117,15 @@ class Settings(BaseModel):
     max_tool_calls: int = 12
     deadline_seconds: int = 120
     app_password: str = "forwardops_app"
+    model_provider_name: Literal["deterministic", "openai"] = "deterministic"
+    analysis_mode: Literal["deterministic", "model"] = "deterministic"
+    openai_api_key: str | None = None
+    openai_model: str = "gpt-4.1-mini"
+    openai_base_url: str = "https://api.openai.com/v1"
+    max_analysis_rounds: int = 16
+    max_model_calls: int = 16
+    token_budget: int = 120_000
+    model_timeout_seconds: float = 30
 
 
 def load_customer(path: Path) -> CustomerConfig:
@@ -145,6 +154,18 @@ def _require_roles(customer: CustomerConfig, identities: tuple[Identity, ...]) -
         raise ConfigError("customer tenant is missing an approver identity")
 
 
+def resolve_model_configuration(provider: str, api_key: str | None) -> tuple[str, str]:
+    if provider == "deterministic":
+        return "deterministic", "deterministic"
+    if provider == "openai":
+        if not api_key:
+            raise ConfigError(
+                "FORWARDOPS_OPENAI_API_KEY is required when FORWARDOPS_MODEL_PROVIDER=openai"
+            )
+        return "model", "openai"
+    raise ConfigError("FORWARDOPS_MODEL_PROVIDER must be deterministic or openai")
+
+
 def build_settings(
     *,
     environment: str,
@@ -156,6 +177,16 @@ def build_settings(
     poll_seconds: float = 0.5,
     lease_seconds: int = 60,
     app_password: str = "forwardops_app",
+    model_provider_name: str = "deterministic",
+    openai_api_key: str | None = None,
+    openai_model: str = "gpt-4.1-mini",
+    openai_base_url: str = "https://api.openai.com/v1",
+    max_tool_calls: int = 12,
+    max_model_calls: int = 16,
+    max_analysis_rounds: int = 16,
+    token_budget: int = 120_000,
+    deadline_seconds: int = 120,
+    model_timeout_seconds: float = 30,
 ) -> Settings:
     if environment != "development":
         raise ConfigError("development authentication cannot start outside development")
@@ -169,6 +200,9 @@ def build_settings(
     runbook_dir = (base / customer.runbook_dir).resolve()
     if not fixture_dir.is_dir() or not runbook_dir.is_dir():
         raise ConfigError("fixture_dir and runbook_dir must exist")
+    analysis_mode, provider_name = resolve_model_configuration(model_provider_name, openai_api_key)
+    if provider_name == "openai" and not openai_base_url.startswith("https://"):
+        raise ConfigError("model provider base URL must use https")
     return Settings(
         environment="development",
         database_url=database_url,
@@ -181,7 +215,18 @@ def build_settings(
         config_digest=sha256_canonical(customer.model_dump(mode="python")),
         poll_seconds=poll_seconds,
         lease_seconds=lease_seconds,
+        max_tool_calls=max_tool_calls,
+        deadline_seconds=deadline_seconds,
         app_password=app_password,
+        model_provider_name="openai" if provider_name == "openai" else "deterministic",
+        analysis_mode="model" if analysis_mode == "model" else "deterministic",
+        openai_api_key=openai_api_key,
+        openai_model=openai_model,
+        openai_base_url=openai_base_url,
+        max_analysis_rounds=max_analysis_rounds,
+        max_model_calls=max_model_calls,
+        token_budget=token_budget,
+        model_timeout_seconds=model_timeout_seconds,
     )
 
 
@@ -198,6 +243,18 @@ def load_settings() -> Settings:
             poll_seconds=float(os.environ.get("FORWARDOPS_POLL_SECONDS", "0.5")),
             lease_seconds=int(os.environ.get("FORWARDOPS_LEASE_SECONDS", "60")),
             app_password=os.environ.get("FORWARDOPS_APP_PASSWORD", "forwardops_app"),
+            model_provider_name=os.environ.get("FORWARDOPS_MODEL_PROVIDER", "deterministic"),
+            openai_api_key=os.environ.get("FORWARDOPS_OPENAI_API_KEY"),
+            openai_model=os.environ.get("FORWARDOPS_OPENAI_MODEL", "gpt-4.1-mini"),
+            openai_base_url=os.environ.get(
+                "FORWARDOPS_OPENAI_BASE_URL", "https://api.openai.com/v1"
+            ),
+            max_tool_calls=int(os.environ.get("FORWARDOPS_MAX_TOOL_CALLS", "12")),
+            max_model_calls=int(os.environ.get("FORWARDOPS_MAX_MODEL_CALLS", "16")),
+            max_analysis_rounds=int(os.environ.get("FORWARDOPS_MAX_ANALYSIS_ROUNDS", "16")),
+            token_budget=int(os.environ.get("FORWARDOPS_TOKEN_BUDGET", "120000")),
+            deadline_seconds=int(os.environ.get("FORWARDOPS_DEADLINE_SECONDS", "120")),
+            model_timeout_seconds=float(os.environ.get("FORWARDOPS_MODEL_TIMEOUT_SECONDS", "30")),
         )
     except KeyError as exc:
         raise ConfigError(f"missing environment variable {exc.args[0]}") from exc

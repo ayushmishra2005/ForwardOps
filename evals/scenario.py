@@ -86,6 +86,7 @@ async def run_stale_oracle(client, app) -> dict:
         "tool_calls": rows["tool_calls"],
         "audits": rows["audits"],
         "actions": rows["actions"],
+        "model_calls": rows["model_calls"],
     }
 
 
@@ -162,7 +163,7 @@ async def _rows(pool, investigation_id: str) -> dict[str, list]:
             await conn.execute("SELECT set_config('app.tenant_id', 'customer-a', true)")
             tools = await conn.execute(
                 """
-                SELECT tool_name, status, attempt, logical_call_id
+                SELECT tool_name, status, attempt, logical_call_id, arguments, error
                 FROM tool_calls
                 WHERE investigation_id = %s
                 ORDER BY started_at, attempt
@@ -185,8 +186,14 @@ async def _rows(pool, investigation_id: str) -> dict[str, list]:
                 """,
                 (investigation,),
             )
+            model = await conn.execute(
+                "SELECT model_calls FROM investigations WHERE id = %s",
+                (investigation,),
+            )
+            model_row = await model.fetchone()
             return {
                 "tool_calls": await tools.fetchall(),
                 "audits": await audits.fetchall(),
                 "actions": await actions.fetchall(),
+                "model_calls": [] if model_row is None else model_row["model_calls"],
             }

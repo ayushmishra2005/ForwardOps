@@ -2,6 +2,7 @@ import logging
 from datetime import datetime, timedelta
 from uuid import UUID, uuid4
 
+from forwardops.application.model_investigation import investigate_with_model
 from forwardops.application.playbooks.withdrawals import ConclusionPlan, investigate_withdrawals
 from forwardops.config import Settings
 from forwardops.domain.actions import proposal_digest
@@ -162,7 +163,9 @@ async def _playbook(
         lease_epoch=claim.lease_epoch,
         lease_owner=claim.lease_owner,
         frozen_observed_at=runtime.settings.customer.frozen_observed_at,
-        max_tool_calls=runtime.settings.max_tool_calls,
+        max_tool_calls=int(
+            investigation.budget.get("max_tool_calls", runtime.settings.max_tool_calls)
+        ),
         lease_seconds=runtime.settings.lease_seconds,
     )
     gateway = ToolGateway(
@@ -171,6 +174,8 @@ async def _playbook(
         context,
         suspend_after_new_tool_calls=suspend_after_new_tool_calls,
     )
+    if investigation.analysis_mode == "model":
+        return await investigate_with_model(database, gateway, runtime, investigation, scope)
     return await investigate_withdrawals(
         gateway, scope, investigation.id, runtime.settings.customer
     )
@@ -187,6 +192,9 @@ async def _persist(
     assert_transition(InvestigationStatus(investigation.status), InvestigationStatus(plan.status))
     async with database.transaction(claim.tenant_id) as conn:
         await require_live_lease(conn, claim)
+        fresh = await get_investigation(conn, claim.tenant_id, claim.investigation_id)
+        if fresh is None:
+            raise LostLeaseError("investigation lease does not match this worker")
         if await count_findings(conn, claim.tenant_id, claim.investigation_id):
             raise RuntimeError("findings already exist for this investigation")
         stored = await evidence_payloads(conn, claim.tenant_id, claim.investigation_id)
@@ -270,7 +278,7 @@ async def _persist(
                 details={"action_type": plan.proposal.action_type, "execution_enabled": False},
             )
         used = await count_succeeded_tools(conn, claim.tenant_id, claim.investigation_id)
-        budget = dict(investigation.budget)
+        budget = dict(fresh.budget)
         budget["tool_calls_used"] = used
         await save_conclusion(
             conn,
@@ -285,6 +293,7 @@ async def _persist(
             confidence_basis=list(plan.confidence_basis),
             root_finding_id=plan.root_finding_id,
             budget=budget,
+            model_calls=list(fresh.model_calls or []),
         )
         await insert_audit(
             conn,

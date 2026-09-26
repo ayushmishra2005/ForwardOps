@@ -281,6 +281,7 @@ async def save_conclusion(
     confidence_basis: list[Any],
     root_finding_id: UUID | None,
     budget: dict[str, Any],
+    model_calls: list[Any] | None = None,
 ) -> None:
     cursor = await conn.execute(
         """
@@ -295,6 +296,7 @@ async def save_conclusion(
             confidence_basis = %s,
             root_finding_id = %s,
             budget = %s,
+            model_calls = COALESCE(%s, model_calls),
             completed_at = clock_timestamp(),
             updated_at = clock_timestamp(),
             lease_owner = NULL,
@@ -314,6 +316,7 @@ async def save_conclusion(
             _json(confidence_basis),
             root_finding_id,
             _json(budget),
+            None if model_calls is None else _json(model_calls),
             claim.tenant_id,
             claim.investigation_id,
             claim.lease_epoch,
@@ -323,6 +326,37 @@ async def save_conclusion(
     )
     if await cursor.fetchone() is None:
         raise LostLeaseError("lost the investigation lease while saving the conclusion")
+
+
+async def update_model_progress(
+    conn: Any,
+    claim: Claim,
+    *,
+    model_calls: list[Any],
+    budget: dict[str, Any],
+) -> None:
+    cursor = await conn.execute(
+        """
+        UPDATE investigations
+        SET model_calls = %s,
+            budget = %s,
+            updated_at = clock_timestamp()
+        WHERE tenant_id = %s AND id = %s
+          AND lease_epoch = %s AND lease_owner = %s
+          AND lease_expires_at > clock_timestamp()
+        RETURNING id
+        """,
+        (
+            _json(model_calls),
+            _json(budget),
+            claim.tenant_id,
+            claim.investigation_id,
+            claim.lease_epoch,
+            claim.lease_owner,
+        ),
+    )
+    if await cursor.fetchone() is None:
+        raise LostLeaseError("lost the investigation lease while recording the model call")
 
 
 async def insert_audit(
